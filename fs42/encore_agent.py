@@ -225,6 +225,20 @@ class EncoreAgent:
                   AND source_start_time >= ?
             """, (agent.station, cutoff.isoformat()))
 
+    @staticmethod
+    def reset_station_state(station_config):
+        agent = EncoreAgent(station_config)
+        with agent._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute("""
+                DELETE FROM encore_cursor
+                WHERE station = ?
+            """, (agent.station,))
+            cursor.execute("""
+                DELETE FROM airing_history
+                WHERE station = ?
+            """, (agent.station,))
+
     def _get_cursor_keys(self):
         with self._get_connection() as connection:
             cursor = connection.cursor()

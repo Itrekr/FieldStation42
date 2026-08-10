@@ -1,10 +1,11 @@
 import datetime
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 _ffmpeg_stub = MagicMock()
 _ffmpeg_stub.probe = MagicMock()
@@ -19,7 +20,9 @@ from fs42.catalog_api import CatalogAPI
 from fs42.block_plan import BlockPlanEntry
 from fs42.encore_agent import EncoreAgent, EncoreUnavailable
 from fs42.liquid_blocks import LiquidBlock
+from fs42.liquid_manager import LiquidManager
 from fs42.liquid_schedule import LiquidSchedule
+from fs42.liquid_api import LiquidAPI
 from fs42.marathon_agent import MarathonAgent
 from fs42.sequence import NamedSequence
 from fs42.sequence_api import SequenceAPI
@@ -159,6 +162,45 @@ def _resolve_and_consume(agent, encore_config, when):
     candidate, key = agent.resolve(encore_config, when)
     agent.record_consumption(key)
     return candidate, key
+
+
+def _seed_encore_state(station, cursor_name="prime1_sunday"):
+    entry = _entry(f"/content/{station}/prime/e01.mp4")
+    conf = {
+        "network_name": station,
+        "content_dir": "/content",
+        "clip_shows": {},
+    }
+    agent = EncoreAgent(conf, FakeCatalog([entry]))
+    source_start = datetime.datetime(2026, 8, 9, 18)
+    agent.record_airing("prime1", _block(entry, source_start))
+    agent.record_consumption({
+        "source": "prime1",
+        "strategy": "queue",
+        "cursor": cursor_name,
+        "source_start_time": source_start.isoformat(),
+    })
+    agent.commit()
+
+
+def _encore_counts():
+    with sqlite3.connect(StationManager().server_conf["db_path"]) as connection:
+        cursor = connection.cursor()
+        cursor.execute("""
+            SELECT station, COUNT(*)
+            FROM airing_history
+            GROUP BY station
+            ORDER BY station
+        """)
+        history = dict(cursor.fetchall())
+        cursor.execute("""
+            SELECT station, COUNT(*)
+            FROM encore_cursor
+            GROUP BY station
+            ORDER BY station
+        """)
+        cursors = dict(cursor.fetchall())
+        return history, cursors
 
 
 class TestEncoreAgent(unittest.TestCase):
@@ -404,6 +446,75 @@ class TestEncoreAgent(unittest.TestCase):
         )
 
         self.assertEqual(candidate.path, new_future.path)
+
+    def test_reset_station_state_clears_history_and_cursors_for_station_only(self):
+        _configure_db(self.tmp_path)
+        _seed_encore_state("TestTV")
+        _seed_encore_state("OtherTV")
+
+        EncoreAgent.reset_station_state({
+            "network_name": "TestTV",
+            "content_dir": "/content",
+            "clip_shows": {},
+        })
+
+        history, cursors = _encore_counts()
+        self.assertEqual(history, {"OtherTV": 1})
+        self.assertEqual(cursors, {"OtherTV": 1})
+
+    def test_delete_sequences_clears_encore_state(self):
+        _configure_db(self.tmp_path)
+        _seed_encore_state("TestTV")
+        _seed_encore_state("OtherTV")
+        conf = {
+            "network_name": "TestTV",
+            "content_dir": "/content",
+            "clip_shows": {},
+        }
+        SequenceIO().put_sequence(
+            "TestTV",
+            NamedSequence(
+                "TestTV",
+                "prime1",
+                "prime",
+                0,
+                1,
+                0,
+                ["/content/prime/e01.mp4"],
+                True,
+            ),
+        )
+
+        SequenceAPI.delete_sequences(conf)
+
+        self.assertEqual(SequenceIO().get_all_sequences_for_station("TestTV"), [])
+        history, cursors = _encore_counts()
+        self.assertEqual(history, {"OtherTV": 1})
+        self.assertEqual(cursors, {"OtherTV": 1})
+
+    def test_reset_schedule_clears_encore_state(self):
+        _configure_db(self.tmp_path)
+        _seed_encore_state("TestTV")
+        station = {
+            "network_name": "TestTV",
+            "network_type": "standard",
+            "_has_schedule": True,
+            "content_dir": "/content",
+            "clip_shows": {},
+        }
+        manager = LiquidManager()
+        manager.schedules = {"TestTV": []}
+
+        with (
+            patch.object(LiquidManager, "reset_sequences", return_value=None),
+            patch.object(LiquidAPI, "delete_blocks", return_value=None),
+            patch.object(LiquidManager, "reload_schedules", return_value=None),
+        ):
+            manager.reset_schedule(station)
+
+        history, cursors = _encore_counts()
+        self.assertEqual(history, {})
+        self.assertEqual(cursors, {})
 
     def test_failed_queue_resolution_does_not_advance_cursor(self):
         first = _entry("/content/prime/show_a/e01.mp4")

@@ -207,10 +207,13 @@ class SequenceAPI:
 
     @staticmethod
     def delete_sequences(station_config):
+        from fs42.encore_agent import EncoreAgent
+
         _l = logging.getLogger("SEQUENCE")
         _l.debug(f"Deleting sequences for {station_config['network_name']}")
         sio = SequenceIO()
         sio.delete_sequences_for_station(station_config["network_name"])
+        EncoreAgent.reset_station_state(station_config)
         _l.debug(f"Deleted sequences for {station_config['network_name']}")
 
     @staticmethod

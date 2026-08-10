@@ -59,8 +59,7 @@ class LiquidManager(object):
             if station_config["_has_schedule"]:
                 logging.getLogger("liquid").info(f"Deleting schedules for {station_config['network_name']}")
                 self.reset_sequences(station_config)
-                self.reset_encore_cursors(station_config)
-                self.reset_airing_history(station_config)
+                self.reset_encore_state(station_config)
                 LiquidAPI.delete_blocks(station_config)
         self.reload_schedules()
 
@@ -69,8 +68,7 @@ class LiquidManager(object):
         if station_config["_has_schedule"]:
             logging.getLogger("liquid").info(f"Deleting schedules for {station_config['network_name']}")
             self.reset_sequences(station_config)
-            self.reset_encore_cursors(station_config)
-            self.reset_airing_history(station_config)
+            self.reset_encore_state(station_config)
             LiquidAPI.delete_blocks(station_config)
         self.reload_schedules()
 
@@ -86,6 +84,10 @@ class LiquidManager(object):
     def reset_airing_history(self, station_config):
         logging.getLogger("liquid").info(f"Resetting future airing history for {station_config['network_name']}")
         EncoreAgent.reset_airing_history(station_config, self._schedule_reset_cutoff())
+
+    def reset_encore_state(self, station_config):
+        logging.getLogger("liquid").info(f"Resetting encore state for {station_config['network_name']}")
+        EncoreAgent.reset_station_state(station_config)
 
     def reset_sequences(self, station_config):
         logging.getLogger("liquid").info(f"Resetting sequences for {station_config['network_name']}")
