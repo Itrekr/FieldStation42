@@ -21,11 +21,13 @@ class NamedSequence:
         current_index: int,
         file_list: list[str],
         initialized: bool = False,
-        sequence_strategy: str = None
+        sequence_strategy: str = None,
+        parent_tag: str = None
     ):
         self.station_name = station_name
         self.sequence_name = sequence_name
         self.tag_path = tag_path
+        self.parent_tag = parent_tag
         self.start_perc = start_perc
         self.end_perc = end_perc
         self.current_index = current_index

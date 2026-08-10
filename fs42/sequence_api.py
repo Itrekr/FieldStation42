@@ -2,16 +2,10 @@ import hashlib
 import logging
 import os
 import random
-import re
 from fs42.timings import DAYS
 from fs42.sequence_io import SequenceIO
 from fs42.media_processor import MediaProcessor
 from fs42.sequence import NamedSequence, SequenceEntry
-
-SEASON_RE = re.compile(
-    r"^(season\s*\d+|s\d+)$",
-    re.IGNORECASE
-)
 
 class SequenceAPI:
     @staticmethod
@@ -53,27 +47,48 @@ class SequenceAPI:
 
     @staticmethod
     def get_next_in_sequence(station_config, sequence_name, tag_path, sequence_strategy=None) -> SequenceEntry:
+        next_entry, _sequence_key = SequenceAPI.get_next_in_sequence_with_key(
+            station_config,
+            sequence_name,
+            tag_path,
+            sequence_strategy
+        )
+        return next_entry
+
+    @staticmethod
+    def get_next_in_sequence_with_key(station_config, sequence_name, tag_path, sequence_strategy=None):
         _l = logging.getLogger("SEQUENCE")
         sio = SequenceIO()
+        group_parent_tag = tag_path
+
         if sequence_strategy == "random_show":
-            tag_path = SequenceAPI._get_active_child_sequence(
+            active_tag_path = SequenceAPI._get_active_child_sequence(
                 station_config,
                 sequence_name,
-                tag_path
+                group_parent_tag
             )
-        seq = sio.get_sequence(station_config["network_name"], sequence_name, tag_path)
+        else:
+            active_tag_path = tag_path
+
+        sequence_key = {
+            "station_name": station_config["network_name"],
+            "sequence_name": sequence_name,
+            "tag_path": active_tag_path
+        }
+
+        seq = sio.get_sequence(station_config["network_name"], sequence_name, active_tag_path)
         
         next_entry = None
         if not seq:
             _l.error(f"Sequence {sequence_name} for {station_config['network_name']} not found.")
-            return None
+            return None, sequence_key
 
         if not seq.episodes:
             _l.error(
-                f"Sequence {sequence_name}:{tag_path} "
+                f"Sequence {sequence_name}:{active_tag_path} "
                 f"contains no episodes"
             )
-            return None
+            return None, sequence_key
 
         if seq.current_index < -1:
             seq.current_index = -1
@@ -84,7 +99,7 @@ class SequenceAPI:
                 f"Sequence completed: "
                 f"{sequence_name}:{seq.tag_path}"
             )
-            parent_tag = seq.tag_path.rsplit("/",1)[0]
+            parent_tag = group_parent_tag
 
             children = sio.get_child_sequences(
                 station_config["network_name"],
@@ -112,6 +127,7 @@ class SequenceAPI:
                     parent_tag,
                     next_child
                 )
+                sequence_key["tag_path"] = next_child
 
                 next_seq = sio.get_sequence(
                     station_config["network_name"],
@@ -128,7 +144,7 @@ class SequenceAPI:
                         f"Child sequence {next_child} "
                         f"contains no episodes"
                     )
-                    return None
+                    return None, sequence_key
 
                 next_entry = next_seq.episodes[
                     next_seq.current_index
@@ -143,7 +159,7 @@ class SequenceAPI:
                     next_seq.current_index
                 )
 
-                return next_entry
+                return next_entry, sequence_key
             
             _l.debug(
                 f"Current index {seq.current_index} reached end of sequence {sequence_name}. Looping back to 0."
@@ -152,10 +168,10 @@ class SequenceAPI:
 
         if not SequenceAPI._normalize_sequence_position(seq):
             _l.error(
-                f"Sequence {sequence_name}:{tag_path} "
+                f"Sequence {sequence_name}:{active_tag_path} "
                 f"contains no episodes"
             )
-            return None
+            return None, sequence_key
 
         try:
             next_entry = seq.episodes[seq.current_index]
@@ -165,9 +181,9 @@ class SequenceAPI:
             _l.error("Try rebuilding sequences with --rebuild_sequences.")
             raise RuntimeError()
         seq.current_index += 1
-        sio.update_current_index(station_config["network_name"], sequence_name, tag_path, seq.current_index)
+        sio.update_current_index(station_config["network_name"], sequence_name, active_tag_path, seq.current_index)
 
-        return next_entry
+        return next_entry, sequence_key
 
     @staticmethod
     def reset_by_episode_path(station_config, sequence_name, tag_path, episode_path):
@@ -324,6 +340,13 @@ class SequenceAPI:
                     seq_name,
                     child_tag
                 )
+                if existing_child:
+                    sio.update_parent_tag(
+                        station_config["network_name"],
+                        seq_name,
+                        child_tag,
+                        seq_tag,
+                    )
                 sio.update_sequence_strategy(
                     station_config["network_name"],
                     seq_name,
@@ -347,7 +370,8 @@ class SequenceAPI:
                         0,
                         file_list,
                         False,
-                        "random_show"
+                        "random_show",
+                        seq_tag
                     )
 
                     sio.put_sequence(
@@ -636,41 +660,20 @@ class SequenceAPI:
     def _find_show_dirs(base_dir):
         show_dirs = []
 
-        for root, dirs, files in os.walk(base_dir, followlinks=True):
-            # follow symlinks and skip dotfiles to stay in sync with _rfind_media
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
+        if not os.path.isdir(base_dir):
+            return show_dirs
 
-            has_media = any(
-                not f.startswith(".")
-                and f.lower().endswith(
-                    tuple(
-                        f".{ext}"
-                        for ext in MediaProcessor.VIDEO_FORMATS
-                    )
-                )
-                for f in files
-            )
-            if not has_media:
-                continue
+        with os.scandir(base_dir) as entries:
+            for entry in entries:
+                if entry.name.startswith("."):
+                    continue
 
-            rel = os.path.relpath(root, base_dir)
+                if not entry.is_dir(follow_symlinks=True):
+                    continue
 
-            if rel == ".":
-                continue
+                show_dir = entry.path
 
-            parts = rel.split(os.sep)
-
-            # remove trailing season folders
-            while parts and SEASON_RE.match(parts[-1]):
-                parts.pop()
-
-            if not parts:
-                continue
-
-            show_rel = os.path.join(*parts)
-
-            show_dirs.append(
-                os.path.join(base_dir, show_rel)
-            )
+                if MediaProcessor._rfind_media(show_dir):
+                    show_dirs.append(show_dir)
 
         return sorted(set(show_dirs))

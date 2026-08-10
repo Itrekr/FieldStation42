@@ -66,7 +66,10 @@ def _install_entries(conf, entries):
     CatalogAPI.set_entries(conf, entries)
 
 
-def _install_sequence(conf, name, tag, entries, strategy=None, current_index=0):
+def _install_sequence(conf, name, tag, entries, strategy=None, current_index=0, parent_tag=None):
+    if parent_tag is None and strategy == "random_show":
+        parent_tag = tag.rsplit("/", 1)[0]
+
     SequenceIO().put_sequence(
         conf["network_name"],
         NamedSequence(
@@ -79,6 +82,7 @@ def _install_sequence(conf, name, tag, entries, strategy=None, current_index=0):
             [entry.path for entry in entries],
             True,
             strategy,
+            parent_tag,
         ),
     )
 
@@ -222,6 +226,88 @@ class TestHardEndScheduling(unittest.TestCase):
         self.assertEqual(
             SequenceIO().get_active_sequence("TestTV", "prime1", "prime"),
             "prime/succession",
+        )
+
+    def test_random_show_rollover_block_uses_new_child_sequence_key(self):
+        conf = _base_conf()
+        slot = {
+            "tags": "prime",
+            "sequence": "prime1",
+            "sequence_strategy": "random_show",
+        }
+        show_a = [_entry("/content/prime/show_a/e01.mp4", 30 * 60, "prime/show_a")]
+        show_b = [_entry("/content/prime/show_b/e01.mp4", 30 * 60, "prime/show_b")]
+        _install_entries(conf, show_a + show_b)
+        _install_sequence(
+            conf,
+            "prime1",
+            "prime/show_a",
+            show_a,
+            strategy="random_show",
+            current_index=1,
+        )
+        _install_sequence(conf, "prime1", "prime/show_b", show_b, strategy="random_show")
+        SequenceIO().set_active_sequence("TestTV", "prime1", "prime", "prime/show_a")
+
+        schedule = LiquidSchedule(conf)
+        block, _next_mark = schedule._fill(
+            slot,
+            "prime",
+            datetime.datetime(2026, 8, 10, 20),
+        )
+
+        self.assertEqual(block.content.path, "/content/prime/show_b/e01.mp4")
+        self.assertEqual(
+            block.sequence_key,
+            {
+                "station_name": "TestTV",
+                "sequence_name": "prime1",
+                "tag_path": "prime/show_b",
+            },
+        )
+
+    def test_random_show_hard_boundary_rewinds_rollover_child(self):
+        conf = _base_conf()
+        conf["monday"] = {
+            "20": {
+                "tags": "prime",
+                "sequence": "prime1",
+                "sequence_strategy": "random_show",
+                "hard_end": "21:00",
+            }
+        }
+        show_a = [_entry("/content/prime/show_a/e01.mp4", 30 * 60, "prime/show_a")]
+        show_b = [_entry("/content/prime/show_b/e01.mp4", 90 * 60, "prime/show_b")]
+        _install_entries(conf, show_a + show_b)
+        _install_sequence(
+            conf,
+            "prime1",
+            "prime/show_a",
+            show_a,
+            strategy="random_show",
+            current_index=1,
+        )
+        _install_sequence(conf, "prime1", "prime/show_b", show_b, strategy="random_show")
+        SequenceIO().set_active_sequence("TestTV", "prime1", "prime", "prime/show_a")
+
+        schedule = self._run_fluid(
+            conf,
+            datetime.datetime(2026, 8, 10, 20),
+            datetime.datetime(2026, 8, 10, 21),
+        )
+
+        self.assertIsInstance(schedule._blocks[0], LiquidBoundaryFillBlock)
+        self.assertEqual(
+            SequenceIO().get_active_sequence("TestTV", "prime1", "prime"),
+            "prime/show_b",
+        )
+        self.assertEqual(
+            SequenceIO().get_sequence("TestTV", "prime1", "prime/show_b").current_index,
+            0,
+        )
+        self.assertEqual(
+            SequenceAPI.get_next_in_sequence(conf, "prime1", "prime", "random_show").fpath,
+            "/content/prime/show_b/e01.mp4",
         )
 
     def test_rejected_encore_does_not_consume_queue(self):

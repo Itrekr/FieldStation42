@@ -105,6 +105,7 @@ def _install_catalog_and_sequences(conf, show_a_count=12, show_b_count=12):
             [entry.path for entry in entries if entry.tag == "prime/show_a"],
             True,
             "random_show",
+            "prime",
         ),
     )
     sio.put_sequence(
@@ -119,6 +120,7 @@ def _install_catalog_and_sequences(conf, show_a_count=12, show_b_count=12):
             [entry.path for entry in entries if entry.tag == "prime/show_b"],
             True,
             "random_show",
+            "prime",
         ),
     )
     sio.set_active_sequence("TestTV", "prime1", "prime", "prime/show_a")
@@ -441,6 +443,7 @@ class TestEncoreAgent(unittest.TestCase):
                 ["/content/prime/show_a/e01.mp4", "/content/prime/show_a/e02.mp4"],
                 True,
                 "random_show",
+                "prime",
             ),
         )
         sio.put_sequence(
@@ -455,6 +458,7 @@ class TestEncoreAgent(unittest.TestCase):
                 ["/content/prime/show_b/e01.mp4", "/content/prime/show_b/e02.mp4"],
                 True,
                 "random_show",
+                "prime",
             ),
         )
         sio.set_active_sequence("TestTV", "prime1", "prime", "prime/show_a")

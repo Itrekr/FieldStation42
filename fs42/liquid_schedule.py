@@ -199,11 +199,14 @@ class LiquidSchedule:
                     )
 
             sequence_strategy = slot_config.get("sequence_strategy")
-            next_seq = SequenceAPI.get_next_in_sequence(self.conf, seq_name, tag_str, sequence_strategy)
+            next_seq, seq_key = SequenceAPI.get_next_in_sequence_with_key(
+                self.conf,
+                seq_name,
+                tag_str,
+                sequence_strategy
+            )
             if next_seq:
                 candidate = self.catalog.entry_by_fpath(next_seq.fpath)
-
-            seq_key = SequenceAPI.make_sequence_key(self.conf, seq_name, tag_str, sequence_strategy)
         else:
             try:
                 candidate = self.catalog.find_candidate(

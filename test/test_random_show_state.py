@@ -32,7 +32,7 @@ def _conf(content_dir="/content", station="TestTV"):
     }
 
 
-def _put_sequence(station, sequence_name, tag_path, current_index=0, count=2, root="/content"):
+def _put_sequence(station, sequence_name, tag_path, current_index=0, count=2, root="/content", parent_tag=None):
     SequenceIO().put_sequence(
         station,
         NamedSequence(
@@ -48,6 +48,7 @@ def _put_sequence(station, sequence_name, tag_path, current_index=0, count=2, ro
             ],
             True,
             "random_show",
+            parent_tag,
         ),
     )
 
@@ -61,6 +62,7 @@ def _put_pool(station, sequence_names, show_tags, root="/content", current_index
                 show_tag,
                 current_index=current_index,
                 root=root,
+                parent_tag=show_tag.rsplit("/", 1)[0],
             )
 
 
@@ -191,6 +193,150 @@ class TestRandomShowState(unittest.TestCase):
             "pool/show_c",
         )
 
+    def test_nested_child_rollover_keeps_group_parent(self):
+        conf = _conf()
+        _put_sequence(
+            "TestTV",
+            "lane1",
+            "pool/show_a/season_a",
+            current_index=2,
+            parent_tag="pool",
+        )
+        _put_sequence(
+            "TestTV",
+            "lane1",
+            "pool/show_b",
+            parent_tag="pool",
+        )
+        sio = SequenceIO()
+        sio.set_active_sequence(
+            "TestTV",
+            "lane1",
+            "pool",
+            "pool/show_a/season_a",
+        )
+
+        SequenceAPI.get_next_in_sequence(conf, "lane1", "pool", "random_show")
+
+        self.assertEqual(
+            sio.get_active_sequence("TestTV", "lane1", "pool"),
+            "pool/show_b",
+        )
+        self.assertIsNone(
+            sio.get_active_sequence("TestTV", "lane1", "pool/show_a")
+        )
+
+    def test_completed_child_rollover_preserves_configured_parent(self):
+        conf = _conf()
+        _put_sequence(
+            "TestTV",
+            "lane1",
+            "pool/show_a",
+            current_index=2,
+            parent_tag="pool",
+        )
+        _put_sequence(
+            "TestTV",
+            "lane1",
+            "pool/show_b",
+            parent_tag="pool",
+        )
+        sio = SequenceIO()
+        sio.set_active_sequence("TestTV", "lane1", "pool", "pool/show_a")
+
+        SequenceAPI.get_next_in_sequence(conf, "lane1", "pool", "random_show")
+
+        self.assertEqual(
+            sio.get_active_sequence("TestTV", "lane1", "pool"),
+            "pool/show_b",
+        )
+        self.assertIsNone(
+            sio.get_active_sequence("TestTV", "lane1", "pool/show_a")
+        )
+
+    def test_multi_season_show_remains_one_sequence(self):
+        content_dir = os.path.join(self.tmp.name, "content")
+        episode_paths = [
+            os.path.join(content_dir, "pool", "Show A", "Season 01", "E01.mp4"),
+            os.path.join(content_dir, "pool", "Show A", "Season 01", "E02.mp4"),
+            os.path.join(content_dir, "pool", "Show A", "Season 02", "E01.mp4"),
+            os.path.join(content_dir, "pool", "Show A", "Season 02", "E02.mp4"),
+        ]
+        for path in episode_paths:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8"):
+                pass
+
+        SequenceAPI._build_sequence(
+            {
+                "network_name": "TestTV",
+                "content_dir": content_dir,
+                "clip_shows": {},
+            },
+            "pool",
+            {
+                "sequence": "lane1",
+                "sequence_strategy": "random_show",
+            },
+        )
+
+        sio = SequenceIO()
+        self.assertEqual(
+            sio.get_child_sequences("TestTV", "lane1", "pool"),
+            ["pool/Show A"],
+        )
+        self.assertEqual(
+            [entry.fpath for entry in sio.get_sequence("TestTV", "lane1", "pool/Show A").episodes],
+            sorted(episode_paths),
+        )
+
+    def test_decorated_and_nested_season_dirs_remain_one_sequence(self):
+        content_dir = os.path.join(self.tmp.name, "content")
+        episode_paths = [
+            os.path.join(
+                content_dir,
+                "pool",
+                "Show A",
+                "Season 01 [1080p]",
+                "Disc 1",
+                "E01.mp4",
+            ),
+            os.path.join(
+                content_dir,
+                "pool",
+                "Show A",
+                "Season 02 (WEB-DL)",
+                "E02.mp4",
+            ),
+        ]
+        for path in episode_paths:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8"):
+                pass
+
+        SequenceAPI._build_sequence(
+            {
+                "network_name": "TestTV",
+                "content_dir": content_dir,
+                "clip_shows": {},
+            },
+            "pool",
+            {
+                "sequence": "lane1",
+                "sequence_strategy": "random_show",
+            },
+        )
+
+        sio = SequenceIO()
+        self.assertEqual(
+            sio.get_child_sequences("TestTV", "lane1", "pool"),
+            ["pool/Show A"],
+        )
+        self.assertEqual(
+            [entry.fpath for entry in sio.get_sequence("TestTV", "lane1", "pool/Show A").episodes],
+            sorted(episode_paths),
+        )
+
     def test_symlink_canonical_identity_avoids_same_physical_show(self):
         content_dir = os.path.join(self.tmp.name, "content")
         media_dir = os.path.join(self.tmp.name, "media", "Show X")
@@ -221,6 +367,7 @@ class TestRandomShowState(unittest.TestCase):
                 [os.path.join(content_dir, "pool_a", "show_x", "e01.mp4")],
                 True,
                 "random_show",
+                "pool_a",
             ),
         )
         sio.put_sequence(
@@ -235,6 +382,7 @@ class TestRandomShowState(unittest.TestCase):
                 [os.path.join(content_dir, "pool_b", "show_x", "e01.mp4")],
                 True,
                 "random_show",
+                "pool_b",
             ),
         )
         sio.put_sequence(
@@ -249,6 +397,7 @@ class TestRandomShowState(unittest.TestCase):
                 [show_y_file],
                 True,
                 "random_show",
+                "pool_b",
             ),
         )
         sio.set_active_sequence("TestTV", "lane1", "pool_a", "pool_a/show_x")

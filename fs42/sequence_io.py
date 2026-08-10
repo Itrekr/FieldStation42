@@ -167,7 +167,7 @@ class SequenceIO:
         with self._get_connection() as connection:
             cursor = connection.cursor()
             cursor.execute(
-                """SELECT id, start_perc, end_perc, current_index, initialized, sequence_strategy
+                """SELECT id, start_perc, end_perc, current_index, initialized, sequence_strategy, parent_tag
                               FROM named_sequence 
                               WHERE station = ? AND sequence_name = ? AND tag_path = ?""",
                 (station_name, sequence_name, tag_path),
@@ -177,7 +177,7 @@ class SequenceIO:
             if row is None:
                 return None
 
-            named_sequence_id, start_perc, end_perc, current_index, initialized, sequence_strategy = row
+            named_sequence_id, start_perc, end_perc, current_index, initialized, sequence_strategy, parent_tag = row
 
             # Now retrieve the sequence entries
             cursor.execute(
@@ -187,7 +187,7 @@ class SequenceIO:
             )
             file_paths = [row[0] for row in cursor.fetchall()]
 
-            ns = NamedSequence(station_name, sequence_name, tag_path, start_perc, end_perc, current_index, file_paths, bool(initialized), sequence_strategy)
+            ns = NamedSequence(station_name, sequence_name, tag_path, start_perc, end_perc, current_index, file_paths, bool(initialized), sequence_strategy, parent_tag)
             
             if ns.initialized != bool(initialized):
                 self.update_initialized(station_name, sequence_name, tag_path, ns.initialized)
@@ -198,7 +198,7 @@ class SequenceIO:
         with self._get_connection() as connection:
             cursor = connection.cursor()
             cursor.execute(
-                """SELECT id, sequence_name, tag_path, start_perc, end_perc, current_index, initialized, sequence_strategy
+                """SELECT id, sequence_name, tag_path, start_perc, end_perc, current_index, initialized, sequence_strategy, parent_tag
                               FROM named_sequence
                               WHERE station = ?""",
                 (station_name,),
@@ -210,7 +210,7 @@ class SequenceIO:
 
             sequences = []
             for row in rows:
-                named_sequence_id, sequence_name, tag_path, start_perc, end_perc, current_index, initialized, sequence_strategy = row
+                named_sequence_id, sequence_name, tag_path, start_perc, end_perc, current_index, initialized, sequence_strategy, parent_tag = row
 
                 # Now retrieve the sequence entries for this sequence
                 cursor.execute(
@@ -220,7 +220,7 @@ class SequenceIO:
                 )
                 file_paths = [entry_row[0] for entry_row in cursor.fetchall()]
 
-                ns = NamedSequence(station_name, sequence_name, tag_path, start_perc, end_perc, current_index, file_paths, bool(initialized), sequence_strategy)
+                ns = NamedSequence(station_name, sequence_name, tag_path, start_perc, end_perc, current_index, file_paths, bool(initialized), sequence_strategy, parent_tag)
                 if ns.initialized != bool(initialized):
                     self.update_initialized(station_name, sequence_name, tag_path, ns.initialized)
                 sequences.append(ns)
@@ -319,6 +319,18 @@ class SequenceIO:
                               SET sequence_strategy = ?
                               WHERE station = ? AND sequence_name = ? AND tag_path = ?""",
                 (sequence_strategy, station_name, sequence_name, tag_path),
+            )
+            cursor.close()
+            connection.commit()
+
+    def update_parent_tag(self, station_name: str, sequence_name: str, tag_path: str, parent_tag: str):
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                """UPDATE named_sequence
+                              SET parent_tag = ?
+                              WHERE station = ? AND sequence_name = ? AND tag_path = ?""",
+                (parent_tag, station_name, sequence_name, tag_path),
             )
             cursor.close()
             connection.commit()
@@ -496,11 +508,12 @@ class SequenceIO:
                 FROM named_sequence
                 WHERE station = ?
                   AND sequence_name = ?
-                  AND tag_path LIKE ?
+                  AND parent_tag = ?
+                ORDER BY tag_path
             """, (
                 station_name,
                 sequence_name,
-                f"{parent_tag}/%"
+                parent_tag
             ))
 
             return [r[0] for r in cursor.fetchall()]
