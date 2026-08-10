@@ -64,7 +64,8 @@ async def search_all_schedules(query: str = None):
                         "network_name": station_name,
                         "schedule_blocks": blocks
                     })
-            
+            return {"query": query, "results": all_results}
+        except Exception as e:
             return {"query": query, "error": str(e), "results": []}
 
 @router.get("/search/{network_name}")
