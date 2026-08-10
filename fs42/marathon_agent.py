@@ -1,3 +1,4 @@
+import copy
 import random
 from fs42.schedule_hint import hint_klass_matcher
 
@@ -30,7 +31,8 @@ class MarathonAgent:
     def fill_marathon(slot: dict):
         buffer = []
         count = slot["marathon"]["count"]
-        del slot["marathon"]
+        slot_copy = copy.deepcopy(slot)
+        slot_copy.pop("marathon", None)
         for _ in range(count - 1):
-            buffer.append(slot)
+            buffer.append(copy.deepcopy(slot_copy))
         return buffer

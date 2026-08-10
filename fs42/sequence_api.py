@@ -15,7 +15,13 @@ SEASON_RE = re.compile(
 
 class SequenceAPI:
     @staticmethod
-    def make_sequence_key(station_config, sequence_name, tag_path) -> dict:
+    def make_sequence_key(station_config, sequence_name, tag_path, sequence_strategy=None) -> dict:
+        if sequence_strategy == "random_show":
+            tag_path = SequenceAPI._get_active_child_sequence(
+                station_config,
+                sequence_name,
+                tag_path
+            )
         return {"station_name": station_config["network_name"], "sequence_name": sequence_name, "tag_path": tag_path}
 
     @staticmethod
@@ -26,15 +32,16 @@ class SequenceAPI:
         return slist
 
     @staticmethod
-    def get_sequence(station_config, sequence_name, tag_path) -> NamedSequence:
+    def get_sequence(station_config, sequence_name, tag_path, sequence_strategy=None) -> NamedSequence:
         _l = logging.getLogger("SEQUENCE")
         sio = SequenceIO()
 
-        tag_path = SequenceAPI._get_active_child_sequence(
-            station_config,
-            sequence_name,
-            tag_path
-        )
+        if sequence_strategy == "random_show":
+            tag_path = SequenceAPI._get_active_child_sequence(
+                station_config,
+                sequence_name,
+                tag_path
+            )
         
         seq = sio.get_sequence(station_config["network_name"], sequence_name, tag_path)
 
@@ -45,14 +52,15 @@ class SequenceAPI:
         return seq
 
     @staticmethod
-    def get_next_in_sequence(station_config, sequence_name, tag_path) -> SequenceEntry:
+    def get_next_in_sequence(station_config, sequence_name, tag_path, sequence_strategy=None) -> SequenceEntry:
         _l = logging.getLogger("SEQUENCE")
         sio = SequenceIO()
-        tag_path = SequenceAPI._get_active_child_sequence(
-            station_config,
-            sequence_name,
-            tag_path
-        )
+        if sequence_strategy == "random_show":
+            tag_path = SequenceAPI._get_active_child_sequence(
+                station_config,
+                sequence_name,
+                tag_path
+            )
         seq = sio.get_sequence(station_config["network_name"], sequence_name, tag_path)
         
         next_entry = None
@@ -60,15 +68,18 @@ class SequenceAPI:
             _l.error(f"Sequence {sequence_name} for {station_config['network_name']} not found.")
             return None
 
-        if not SequenceAPI._normalize_sequence_position(seq):
+        if not seq.episodes:
             _l.error(
                 f"Sequence {sequence_name}:{tag_path} "
                 f"contains no episodes"
             )
             return None
+
+        if seq.current_index < -1:
+            seq.current_index = -1
             
         # Handle end of sequence - reset to 0 to loop back to beginning
-        elif seq.current_index >= seq.end_index:
+        if seq.current_index >= seq.end_index:
             _l.info(
                 f"Sequence completed: "
                 f"{sequence_name}:{seq.tag_path}"
@@ -81,7 +92,7 @@ class SequenceAPI:
                 parent_tag
             )
 
-            if children:
+            if seq.sequence_strategy == "random_show" and children:
 
                 next_child = SequenceAPI._choose_next_child_sequence(
                     station_config,
@@ -138,6 +149,13 @@ class SequenceAPI:
                 f"Current index {seq.current_index} reached end of sequence {sequence_name}. Looping back to 0."
             )
             seq.current_index = 0
+
+        if not SequenceAPI._normalize_sequence_position(seq):
+            _l.error(
+                f"Sequence {sequence_name}:{tag_path} "
+                f"contains no episodes"
+            )
+            return None
 
         try:
             next_entry = seq.episodes[seq.current_index]
@@ -306,6 +324,12 @@ class SequenceAPI:
                     seq_name,
                     child_tag
                 )
+                sio.update_sequence_strategy(
+                    station_config["network_name"],
+                    seq_name,
+                    child_tag,
+                    "random_show",
+                )
 
                 file_list = MediaProcessor._rfind_media(show_dir)
 
@@ -322,7 +346,8 @@ class SequenceAPI:
                         seq_end,
                         0,
                         file_list,
-                        False
+                        False,
+                        "random_show"
                     )
 
                     sio.put_sequence(
@@ -401,6 +426,12 @@ class SequenceAPI:
             ns = NamedSequence(station_config["network_name"], seq_name, seq_tag, seq_start, seq_end, 0, file_list, False)
             sio.put_sequence(station_config["network_name"], ns)
         else:
+            sio.update_sequence_strategy(
+                station_config["network_name"],
+                seq_name,
+                seq_tag,
+                None,
+            )
             disk_files = set(str(f) for f in file_list)
             stored_files = set(entry.fpath for entry in existing.episodes)
             if disk_files != stored_files:

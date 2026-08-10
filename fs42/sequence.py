@@ -20,7 +20,8 @@ class NamedSequence:
         end_perc: float,
         current_index: int,
         file_list: list[str],
-        initialized: bool = False
+        initialized: bool = False,
+        sequence_strategy: str = None
     ):
         self.station_name = station_name
         self.sequence_name = sequence_name
@@ -29,6 +30,7 @@ class NamedSequence:
         self.end_perc = end_perc
         self.current_index = current_index
         self.initialized = initialized
+        self.sequence_strategy = sequence_strategy
         self.episodes = []  # Initialize episodes as an empty list
         self.start_index = 0
         self.end_index = 0

@@ -38,6 +38,7 @@ class SequenceIO:
                                 end_perc REAL NOT NULL,
                                 current_index INTEGER NOT NULL,
                                 initialized INTEGER NOT NULL DEFAULT 1,
+                                sequence_strategy TEXT,
                                 UNIQUE(station, sequence_name, tag_path)
                             )""")
             try:
@@ -46,6 +47,11 @@ class SequenceIO:
                 pass
             try:
                 cursor.execute("ALTER TABLE named_sequence ADD COLUMN parent_tag TEXT")
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e):
+                    raise
+            try:
+                cursor.execute("ALTER TABLE named_sequence ADD COLUMN sequence_strategy TEXT")
             except sqlite3.OperationalError as e:
                 if "duplicate column name" not in str(e):
                     raise
@@ -101,14 +107,15 @@ class SequenceIO:
             cursor.execute(
                 """
                 INSERT OR REPLACE INTO named_sequence
-                    (station, sequence_name, tag_path, start_perc, end_perc, current_index, initialized, parent_tag)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (station, sequence_name, tag_path, start_perc, end_perc, current_index, initialized, parent_tag, sequence_strategy)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(station, sequence_name, tag_path)
                 DO UPDATE SET
                     start_perc = excluded.start_perc,
                     end_perc = excluded.end_perc,
                     current_index = excluded.current_index,
-                    parent_tag = excluded.parent_tag
+                    parent_tag = excluded.parent_tag,
+                    sequence_strategy = excluded.sequence_strategy
                 """,
                 (
                     station_name,
@@ -119,6 +126,7 @@ class SequenceIO:
                     named_sequence.current_index,
                     int(named_sequence.initialized),                    
                     getattr(named_sequence, "parent_tag", None),
+                    getattr(named_sequence, "sequence_strategy", None),
                 ),
             )
 
@@ -159,7 +167,7 @@ class SequenceIO:
         with self._get_connection() as connection:
             cursor = connection.cursor()
             cursor.execute(
-                """SELECT id, start_perc, end_perc, current_index , initialized
+                """SELECT id, start_perc, end_perc, current_index, initialized, sequence_strategy
                               FROM named_sequence 
                               WHERE station = ? AND sequence_name = ? AND tag_path = ?""",
                 (station_name, sequence_name, tag_path),
@@ -169,7 +177,7 @@ class SequenceIO:
             if row is None:
                 return None
 
-            named_sequence_id, start_perc, end_perc, current_index, initialized = row
+            named_sequence_id, start_perc, end_perc, current_index, initialized, sequence_strategy = row
 
             # Now retrieve the sequence entries
             cursor.execute(
@@ -179,7 +187,7 @@ class SequenceIO:
             )
             file_paths = [row[0] for row in cursor.fetchall()]
 
-            ns = NamedSequence(station_name, sequence_name, tag_path, start_perc, end_perc, current_index, file_paths, bool(initialized))
+            ns = NamedSequence(station_name, sequence_name, tag_path, start_perc, end_perc, current_index, file_paths, bool(initialized), sequence_strategy)
             
             if ns.initialized != bool(initialized):
                 self.update_initialized(station_name, sequence_name, tag_path, ns.initialized)
@@ -190,7 +198,7 @@ class SequenceIO:
         with self._get_connection() as connection:
             cursor = connection.cursor()
             cursor.execute(
-                """SELECT id, sequence_name, tag_path, start_perc, end_perc, current_index, initialized
+                """SELECT id, sequence_name, tag_path, start_perc, end_perc, current_index, initialized, sequence_strategy
                               FROM named_sequence
                               WHERE station = ?""",
                 (station_name,),
@@ -202,7 +210,7 @@ class SequenceIO:
 
             sequences = []
             for row in rows:
-                named_sequence_id, sequence_name, tag_path, start_perc, end_perc, current_index, initialized = row
+                named_sequence_id, sequence_name, tag_path, start_perc, end_perc, current_index, initialized, sequence_strategy = row
 
                 # Now retrieve the sequence entries for this sequence
                 cursor.execute(
@@ -212,7 +220,7 @@ class SequenceIO:
                 )
                 file_paths = [entry_row[0] for entry_row in cursor.fetchall()]
 
-                ns = NamedSequence(station_name, sequence_name, tag_path, start_perc, end_perc, current_index, file_paths, bool(initialized))
+                ns = NamedSequence(station_name, sequence_name, tag_path, start_perc, end_perc, current_index, file_paths, bool(initialized), sequence_strategy)
                 if ns.initialized != bool(initialized):
                     self.update_initialized(station_name, sequence_name, tag_path, ns.initialized)
                 sequences.append(ns)
@@ -295,6 +303,18 @@ class SequenceIO:
                               SET initialized = ?
                               WHERE station = ? AND sequence_name = ? AND tag_path = ?""",
                 (int(value), station_name, sequence_name, tag_path),
+            )
+            cursor.close()
+            connection.commit()
+
+    def update_sequence_strategy(self, station_name: str, sequence_name: str, tag_path: str, sequence_strategy: str):
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                """UPDATE named_sequence
+                              SET sequence_strategy = ?
+                              WHERE station = ? AND sequence_name = ? AND tag_path = ?""",
+                (sequence_strategy, station_name, sequence_name, tag_path),
             )
             cursor.close()
             connection.commit()
