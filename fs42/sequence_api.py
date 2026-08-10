@@ -527,7 +527,11 @@ class SequenceAPI:
             not active_child
             or active_child not in children
         ):
-            active_child = random.choice(children)
+            active_child = SequenceAPI._choose_next_child_sequence(
+                station_config,
+                sequence_name,
+                parent_tag,
+            )
 
             sio.set_active_sequence(
                 station_config["network_name"],

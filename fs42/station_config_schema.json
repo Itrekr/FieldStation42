@@ -621,6 +621,11 @@
           "type": "integer",
           "description": "Time increment for this slot"
         },
+        "hard_end": {
+          "type": "string",
+          "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+          "description": "Optional wall-clock boundary in HH:MM. Programmes in this slot may not cross this time; remaining time is filled to the boundary."
+        },
         "sequence": {
           "type": "string",
           "description": "Sequence identifier"

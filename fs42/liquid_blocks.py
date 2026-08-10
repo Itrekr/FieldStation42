@@ -28,6 +28,10 @@ class LiquidBlock:
         
         self.sequence_key = None
         self.encore_key = None
+        self.start_bump = None
+        self.end_bump = None
+        self.bump_override = None
+        self.commercial_override = None
 
         if break_info:
             #print("break info: ", break_info)
@@ -265,6 +269,39 @@ class LiquidClipBlock(LiquidBlock):
         self.plan = ReelCutter.cut_reels_into_clips(
             self.content, self.reel_blocks, self.break_strategy, self.start_bump, self.end_bump
         )
+
+
+class LiquidBoundaryFillBlock(LiquidBlock):
+    def __init__(self, start_time, end_time, title="Filler", break_info=None):
+        super().__init__(None, start_time, end_time, title, "end", break_info)
+
+    def __str__(self):
+        return f"{self.start_time.strftime('%m/%d %H:%M')} - {self.end_time.strftime('%H:%M')} - {self.title}"
+
+    def content_duration(self):
+        return 0
+
+    def make_plan(self, catalog):
+        duration = self.playback_duration()
+        self.plan = []
+        if duration <= 0:
+            return
+
+        reels = catalog.make_reel_fill(
+            self.start_time,
+            duration,
+            commercial_dir=self.commercial_override,
+            bump_dir=self.bump_override,
+            lookahead=self.lookahead,
+        )
+        for reel in reels:
+            if reel.start_bump:
+                self.plan.append(BlockPlanEntry(reel.start_bump.path, 0, reel.start_bump.duration))
+            for comm in reel.comms:
+                self.plan.append(BlockPlanEntry(comm.path, 0, comm.duration))
+            if reel.end_bump:
+                self.plan.append(BlockPlanEntry(reel.end_bump.path, 0, reel.end_bump.duration))
+
 
 class LiquidWebBlock(LiquidBlock):
     def __init__(self, content, start_time, end_time, title=None, break_strategy="standard", break_info=None):

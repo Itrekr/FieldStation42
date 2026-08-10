@@ -365,6 +365,9 @@ Tags can be:
 |----------|------|-------------|
 | `schedule_increment` | integer | Override time increment for this slot |
 | `break_strategy` | string | Override break strategy (`"standard"`, `"end"`, or `"center"`) |
+| `hard_end` | string | Optional wall-clock boundary (`"HH:MM"`) that this slot's programmes may not cross |
+
+When `hard_end` is set, the scheduler may keep scheduling complete programmes inside the window, but it rejects any programme whose calculated block end would cross the boundary. Rejected sequence episodes are rewound so they remain next, rejected Encore queue entries remain unconsumed, and the remaining gap is filled exactly to the boundary. For example, `"hard_end": "21:00"` allows a `19:30-21:00` block but rejects a `20:00-21:30` block and fills `20:00-21:00` instead. Midnight boundaries use the next calendar day, so `"hard_end": "00:00"` at `23:30` resolves to the following midnight.
 
 ### Sequences
 

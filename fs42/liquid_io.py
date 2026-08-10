@@ -5,7 +5,7 @@ from datetime import datetime
 from fs42.catalog_entry import CatalogEntry
 from fs42.autobump_agent import AutoBumpAgent
 from fs42.station_manager import StationManager
-from fs42.liquid_blocks import LiquidBlock, LiquidLoopBlock, LiquidClipBlock, LiquidOffAirBlock, LiquidWebBlock
+from fs42.liquid_blocks import LiquidBlock, LiquidLoopBlock, LiquidClipBlock, LiquidOffAirBlock, LiquidWebBlock, LiquidBoundaryFillBlock
 from fs42.block_plan import BlockPlanEntry
 from fs42.catalog_api import CatalogAPI
 from fs42.title_parser import TitleParser
@@ -195,7 +195,7 @@ class LiquidIO:
                 elif block.content:
                     content_json = json.dumps([c.dbid for c in block.content])
                 else:
-                    content_json = None
+                    content_json = json.dumps([])
 
 
                 # plan_json = json.dumps(block.plan.toJSON()) if block.plan else None
@@ -314,6 +314,8 @@ class LiquidIO:
                 return LiquidLoopBlock(*args)
             case "LiquidWebBlock":
                 return LiquidWebBlock(*args)
+            case "LiquidBoundaryFillBlock":
+                return LiquidBoundaryFillBlock(args[1], args[2], args[3], args[5])
             case _:
                 raise ValueError(f"Unknown liquid type: {liquid_type}")
 

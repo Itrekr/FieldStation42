@@ -10,7 +10,7 @@ import math
 from fs42.catalog import ShowCatalog, MatchingContentNotFound
 from fs42.slot_reader import SlotReader
 from fs42 import timings
-from fs42.liquid_blocks import LiquidBlock, LiquidClipBlock, LiquidOffAirBlock, LiquidLoopBlock, LiquidWebBlock
+from fs42.liquid_blocks import LiquidBlock, LiquidClipBlock, LiquidOffAirBlock, LiquidLoopBlock, LiquidWebBlock, LiquidBoundaryFillBlock
 from fs42.sequence_api import SequenceAPI
 from fs42.catalog_api import CatalogAPI
 from fs42.liquid_api import LiquidAPI
@@ -92,6 +92,93 @@ class LiquidSchedule:
         next_mark = current_mark + datetime.timedelta(seconds=target_duration)
         new_block = LiquidBlock(candidate, current_mark, next_mark, candidate.title, break_strategy, break_info)
         return (new_block, next_mark)
+
+    def _resolve_hard_end(self, slot_config, current_mark):
+        if not slot_config or "hard_end" not in slot_config:
+            return None
+
+        value = slot_config["hard_end"]
+        if not isinstance(value, str):
+            raise ValueError(f"Invalid hard_end value {value!r}; expected HH:MM")
+
+        parts = value.split(":")
+        if len(parts) != 2:
+            raise ValueError(f"Invalid hard_end value {value!r}; expected HH:MM")
+
+        try:
+            hour = int(parts[0])
+            minute = int(parts[1])
+        except ValueError:
+            raise ValueError(f"Invalid hard_end value {value!r}; expected HH:MM")
+
+        if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+            raise ValueError(f"Invalid hard_end value {value!r}; expected HH:MM")
+
+        hard_end = current_mark.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if hard_end <= current_mark:
+            hard_end += datetime.timedelta(days=1)
+        return hard_end
+
+    @staticmethod
+    def _block_fits_boundary(block, hard_end):
+        return hard_end is None or block.end_time <= hard_end
+
+    def _rollback_rejected_block(self, block):
+        if not block or not getattr(block, "sequence_key", None):
+            return
+        if not block.content or isinstance(block.content, list):
+            return
+
+        sequence_key = block.sequence_key
+        SequenceAPI.reset_by_episode_path(
+            self.conf,
+            sequence_key["sequence_name"],
+            sequence_key["tag_path"],
+            block.content.path,
+        )
+        self._l.info(
+            f"Rewound sequence {sequence_key['sequence_name']}:{sequence_key['tag_path']} "
+            f"to rejected episode {block.content.title}"
+        )
+
+    def _fill_to_boundary(self, current_mark, hard_end, slot_config=None, exclusion_index=None):
+        if hard_end <= current_mark:
+            raise ValueError(f"Hard boundary {hard_end} is not after current mark {current_mark}")
+
+        remaining = (hard_end - current_mark).total_seconds()
+        self._l.info(f"Filling {remaining} seconds to hard boundary {hard_end}")
+
+        fallback_tag = self.conf.get("fallback_tag")
+        if fallback_tag:
+            try:
+                candidate = self.catalog.find_candidate(
+                    fallback_tag,
+                    remaining + 0.001,
+                    current_mark,
+                    exclusion_index=exclusion_index,
+                    proposed_start=current_mark,
+                )
+                if candidate.duration <= remaining:
+                    filler_config = dict(slot_config or {})
+                    filler_config["tags"] = fallback_tag
+                    filler_config.pop("sequence", None)
+                    filler_config.pop("sequence_strategy", None)
+                    filler_config.pop("airing_id", None)
+                    break_info, break_strategy, _increment = self._break_info(
+                        filler_config,
+                        fallback_tag,
+                        candidate.path,
+                    )
+                    block = LiquidBlock(candidate, current_mark, hard_end, candidate.title, break_strategy, break_info)
+                    return block, hard_end
+            except MatchingContentNotFound:
+                pass
+
+        break_info = {
+            "bump_dir": (slot_config or {}).get("bump_dir", self.conf.get("bump_dir", None)),
+            "commercial_dir": (slot_config or {}).get("commercial_dir", self.conf.get("commercial_dir", None)),
+        }
+        return LiquidBoundaryFillBlock(current_mark, hard_end, "Filler", break_info), hard_end
 
     def _fill(self, slot_config, tag_str, current_mark, tag_index=None, exclusion_index=None) -> LiquidBlock:
         seq_key = None
@@ -388,6 +475,10 @@ class LiquidSchedule:
             if slot_config and MarathonAgent.detect_marathon(slot_config, current_mark):
                 forward_buffer = MarathonAgent.fill_marathon(slot_config)
 
+            hard_end = self._resolve_hard_end(slot_config, current_mark)
+            if hard_end:
+                hard_end = min(hard_end, end_target)
+
             is_encore = bool(slot_config and "encore" in slot_config)
             tag_str = None
             tag_index = None
@@ -395,6 +486,7 @@ class LiquidSchedule:
                 tag_str,tag_index = SlotReader.get_tag_from_slot(slot_config, current_mark)
 
             new_block = None
+            encore_key = None
             onair_flag = True
             if is_encore:
                 onair_flag = True
@@ -403,8 +495,6 @@ class LiquidSchedule:
                     slot_tags = slot_config.get("tags")
                     tag_for_breaks = slot_tags if isinstance(slot_tags, str) else candidate.tag
                     new_block, next_mark = self._block_for_candidate(slot_config, tag_for_breaks, current_mark, candidate)
-                    new_block.encore_key = encore_key
-                    encore_agent.record_consumption(encore_key)
                 except (EncoreUnavailable, ClipShowKickBack, MatchingContentNotFound) as e:
                     if "fallback_tag" in self.conf:
                         fb_config = {"tags": self.conf["fallback_tag"]}
@@ -462,9 +552,31 @@ class LiquidSchedule:
                 else:
                     new_block = LiquidOffAirBlock(candidate, current_mark, next_mark, "Offair", sign_off=sign_off)
 
-            # here
+            accepted_source_airing_id = slot_config.get("airing_id") if slot_config else None
+            if hard_end and not self._block_fits_boundary(new_block, hard_end):
+                self._l.info(
+                    f"Candidate {new_block.title} would end at {new_block.end_time}, "
+                    f"exceeding hard boundary {hard_end}; rejecting candidate"
+                )
+                if encore_key:
+                    self._l.info(
+                        f"Encore candidate does not fit before {hard_end}; leaving queue cursor unchanged"
+                    )
+                self._rollback_rejected_block(new_block)
+                new_block, next_mark = self._fill_to_boundary(
+                    current_mark,
+                    hard_end,
+                    slot_config,
+                    exclusion_index=exclusion_index,
+                )
+                encore_key = None
+                accepted_source_airing_id = None
+            elif encore_key:
+                new_block.encore_key = encore_key
+                encore_agent.record_consumption(encore_key)
+
             new_blocks.append(new_block)
-            encore_agent.record_airing(slot_config.get("airing_id") if slot_config else None, new_block)
+            encore_agent.record_airing(accepted_source_airing_id, new_block)
             self._register_exclusion(exclusion_index, new_block)
             current_mark = next_mark
         self._l.info("Content and reel schedules are completed")
