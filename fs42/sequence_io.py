@@ -240,6 +240,10 @@ class SequenceIO:
             )
             # Delete the named sequences for the station
             cursor.execute("""DELETE FROM named_sequence WHERE station = ?""", (station_name,))
+            cursor.execute(
+                """DELETE FROM sequence_group_state WHERE station = ?""",
+                (station_name,),
+            )
             connection.commit()
 
     def delete_sequence(self,station_name,sequence_name,tag_path):

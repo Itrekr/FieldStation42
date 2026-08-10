@@ -472,6 +472,20 @@ class SequenceAPI:
                 station_config["network_name"]
             )
         )
+        active_child_identities = set(
+            SequenceAPI._child_sequence_identity(
+                station_config,
+                sequence_name,
+                active_child
+            )
+            for active_child in active_children
+        )
+        active_child_identities.discard(None)
+        current_identity = SequenceAPI._child_sequence_identity(
+            station_config,
+            sequence_name,
+            current_tag_path
+        )
 
         available = []
 
@@ -483,6 +497,24 @@ class SequenceAPI:
             if child in active_children:
                 continue
 
+            child_identity = SequenceAPI._child_sequence_identity(
+                station_config,
+                sequence_name,
+                child
+            )
+
+            if (
+                child_identity
+                and child_identity == current_identity
+            ):
+                continue
+
+            if (
+                child_identity
+                and child_identity in active_child_identities
+            ):
+                continue
+
             available.append(child)
 
         # If every child is already active somewhere, fall back to allowing active children.
@@ -491,7 +523,14 @@ class SequenceAPI:
             available = [
                 c
                 for c in children
-                if c != current_tag_path
+                if (
+                    c != current_tag_path
+                    and SequenceAPI._child_sequence_identity(
+                        station_config,
+                        sequence_name,
+                        c
+                    ) != current_identity
+                )
             ]
 
         # If literally only one child exists, allow it.
@@ -499,6 +538,43 @@ class SequenceAPI:
             available = children
 
         return random.choice(available)
+
+    @staticmethod
+    def _child_sequence_identity(
+        station_config,
+        sequence_name,
+        tag_path
+    ):
+        if not tag_path:
+            return None
+
+        sio = SequenceIO()
+        seq = sio.get_sequence(
+            station_config["network_name"],
+            sequence_name,
+            tag_path
+        )
+
+        if seq and seq.episodes:
+            episode_dirs = [
+                os.path.dirname(
+                    os.path.realpath(entry.fpath)
+                )
+                for entry in seq.episodes
+            ]
+
+            try:
+                return os.path.commonpath(episode_dirs)
+            except ValueError:
+                return episode_dirs[0]
+
+        content_dir = station_config.get("content_dir")
+        if content_dir:
+            return os.path.realpath(
+                os.path.join(content_dir, tag_path)
+            )
+
+        return os.path.realpath(tag_path)
         
     @staticmethod
     def _get_active_child_sequence(

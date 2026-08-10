@@ -1,0 +1,267 @@
+import os
+import sqlite3
+import sys
+import tempfile
+import unittest
+from unittest.mock import MagicMock, patch
+
+_ffmpeg_stub = MagicMock()
+_ffmpeg_stub.probe = MagicMock()
+sys.modules.setdefault("ffmpeg", _ffmpeg_stub)
+
+_moviepy_stub = MagicMock()
+sys.modules.setdefault("moviepy", _moviepy_stub)
+sys.modules.setdefault("moviepy.editor", _moviepy_stub)
+
+from fs42.sequence import NamedSequence
+from fs42.sequence_api import SequenceAPI
+from fs42.sequence_io import SequenceIO
+from fs42.station_manager import StationManager
+
+
+def _configure_db(tmp_path):
+    manager = StationManager()
+    manager.server_conf["db_path"] = os.path.join(tmp_path, "fs42.db")
+    manager.server_conf["normalize_titles"] = False
+
+
+def _conf(content_dir="/content", station="TestTV"):
+    return {
+        "network_name": station,
+        "content_dir": content_dir,
+    }
+
+
+def _put_sequence(station, sequence_name, tag_path, current_index=0, count=2, root="/content"):
+    SequenceIO().put_sequence(
+        station,
+        NamedSequence(
+            station,
+            sequence_name,
+            tag_path,
+            0,
+            1,
+            current_index,
+            [
+                os.path.join(root, tag_path, f"e{index:02}.mp4")
+                for index in range(1, count + 1)
+            ],
+            True,
+            "random_show",
+        ),
+    )
+
+
+def _put_pool(station, sequence_names, show_tags, root="/content", current_index=0):
+    for sequence_name in sequence_names:
+        for show_tag in show_tags:
+            _put_sequence(
+                station,
+                sequence_name,
+                show_tag,
+                current_index=current_index,
+                root=root,
+            )
+
+
+def _group_state_rows(db_path):
+    with sqlite3.connect(db_path) as connection:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            SELECT station, sequence_name, parent_tag, active_tag_path
+            FROM sequence_group_state
+            ORDER BY station, sequence_name
+            """
+        )
+        return cursor.fetchall()
+
+
+class TestRandomShowState(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        _configure_db(self.tmp.name)
+        self.db_path = StationManager().server_conf["db_path"]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_rebuild_clears_group_state(self):
+        _put_pool("TestTV", ["lane1", "lane2"], ["pool/show_a", "pool/show_b"])
+        sio = SequenceIO()
+        sio.set_active_sequence("TestTV", "lane1", "pool", "pool/show_a")
+        sio.set_active_sequence("TestTV", "lane2", "pool", "pool/show_b")
+
+        sio.delete_sequences_for_station("TestTV")
+
+        self.assertEqual(sio.get_all_sequences_for_station("TestTV"), [])
+        self.assertEqual(_group_state_rows(self.db_path), [])
+
+    def test_rebuild_does_not_affect_another_station_group_state(self):
+        _put_pool("StationA", ["lane1"], ["pool/show_a"])
+        _put_pool("StationB", ["lane1"], ["pool/show_b"])
+        sio = SequenceIO()
+        sio.set_active_sequence("StationA", "lane1", "pool", "pool/show_a")
+        sio.set_active_sequence("StationB", "lane1", "pool", "pool/show_b")
+
+        sio.delete_sequences_for_station("StationA")
+
+        self.assertEqual(
+            _group_state_rows(self.db_path),
+            [("StationB", "lane1", "pool", "pool/show_b")],
+        )
+
+    def test_three_lanes_choose_three_different_shows(self):
+        conf = _conf()
+        _put_pool(
+            "TestTV",
+            ["lane1", "lane2", "lane3"],
+            ["pool/show_a", "pool/show_b", "pool/show_c", "pool/show_d"],
+        )
+
+        selections = [
+            SequenceAPI._get_active_child_sequence(conf, lane, "pool")
+            for lane in ("lane1", "lane2", "lane3")
+        ]
+
+        self.assertEqual(len(set(selections)), 3)
+
+    def test_duplication_allowed_when_unavoidable(self):
+        conf = _conf()
+        _put_pool(
+            "TestTV",
+            ["lane1", "lane2", "lane3"],
+            ["pool/show_a", "pool/show_b"],
+        )
+
+        selections = [
+            SequenceAPI._get_active_child_sequence(conf, lane, "pool")
+            for lane in ("lane1", "lane2", "lane3")
+        ]
+
+        self.assertEqual(len(selections), 3)
+        self.assertTrue(all(selections))
+        self.assertLess(len(set(selections)), 3)
+
+    def test_existing_active_child_persists(self):
+        conf = _conf()
+        _put_pool("TestTV", ["lane1"], ["pool/show_a", "pool/show_b"])
+        SequenceIO().set_active_sequence("TestTV", "lane1", "pool", "pool/show_a")
+
+        selections = [
+            SequenceAPI._get_active_child_sequence(conf, "lane1", "pool")
+            for _ in range(3)
+        ]
+
+        self.assertEqual(selections, ["pool/show_a", "pool/show_a", "pool/show_a"])
+
+    def test_rollover_avoids_current_show(self):
+        conf = _conf()
+        _put_pool(
+            "TestTV",
+            ["lane1"],
+            ["pool/show_a", "pool/show_b", "pool/show_c"],
+            current_index=2,
+        )
+        SequenceIO().set_active_sequence("TestTV", "lane1", "pool", "pool/show_a")
+
+        SequenceAPI.get_next_in_sequence(conf, "lane1", "pool", "random_show")
+
+        self.assertIn(
+            SequenceIO().get_active_sequence("TestTV", "lane1", "pool"),
+            {"pool/show_b", "pool/show_c"},
+        )
+
+    def test_rollover_avoids_other_active_lanes(self):
+        conf = _conf()
+        _put_pool(
+            "TestTV",
+            ["lane1", "lane2"],
+            ["pool/show_a", "pool/show_b", "pool/show_c"],
+        )
+        SequenceIO().update_current_index("TestTV", "lane1", "pool/show_a", 2)
+        sio = SequenceIO()
+        sio.set_active_sequence("TestTV", "lane1", "pool", "pool/show_a")
+        sio.set_active_sequence("TestTV", "lane2", "pool", "pool/show_b")
+
+        SequenceAPI.get_next_in_sequence(conf, "lane1", "pool", "random_show")
+
+        self.assertEqual(
+            sio.get_active_sequence("TestTV", "lane1", "pool"),
+            "pool/show_c",
+        )
+
+    def test_symlink_canonical_identity_avoids_same_physical_show(self):
+        content_dir = os.path.join(self.tmp.name, "content")
+        media_dir = os.path.join(self.tmp.name, "media", "Show X")
+        os.makedirs(media_dir)
+        os.makedirs(os.path.join(content_dir, "pool_a"))
+        os.makedirs(os.path.join(content_dir, "pool_b"))
+        os.symlink(media_dir, os.path.join(content_dir, "pool_a", "show_x"))
+        os.symlink(media_dir, os.path.join(content_dir, "pool_b", "show_x"))
+        os.makedirs(os.path.join(content_dir, "pool_b", "show_y"))
+
+        show_x_file = os.path.join(media_dir, "e01.mp4")
+        show_y_file = os.path.join(content_dir, "pool_b", "show_y", "e01.mp4")
+        with open(show_x_file, "w", encoding="utf-8"):
+            pass
+        with open(show_y_file, "w", encoding="utf-8"):
+            pass
+
+        sio = SequenceIO()
+        sio.put_sequence(
+            "TestTV",
+            NamedSequence(
+                "TestTV",
+                "lane1",
+                "pool_a/show_x",
+                0,
+                1,
+                0,
+                [os.path.join(content_dir, "pool_a", "show_x", "e01.mp4")],
+                True,
+                "random_show",
+            ),
+        )
+        sio.put_sequence(
+            "TestTV",
+            NamedSequence(
+                "TestTV",
+                "lane2",
+                "pool_b/show_x",
+                0,
+                1,
+                0,
+                [os.path.join(content_dir, "pool_b", "show_x", "e01.mp4")],
+                True,
+                "random_show",
+            ),
+        )
+        sio.put_sequence(
+            "TestTV",
+            NamedSequence(
+                "TestTV",
+                "lane2",
+                "pool_b/show_y",
+                0,
+                1,
+                0,
+                [show_y_file],
+                True,
+                "random_show",
+            ),
+        )
+        sio.set_active_sequence("TestTV", "lane1", "pool_a", "pool_a/show_x")
+
+        with patch("random.choice", side_effect=lambda choices: choices[0]):
+            selection = SequenceAPI._get_active_child_sequence(
+                _conf(content_dir=content_dir),
+                "lane2",
+                "pool_b",
+            )
+
+        self.assertEqual(selection, "pool_b/show_y")
+
+
+if __name__ == "__main__":
+    unittest.main()
