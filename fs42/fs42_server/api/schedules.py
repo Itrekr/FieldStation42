@@ -129,8 +129,8 @@ def get_all_schedules(start: str = None, end: str = None, include_meta: bool = F
         return {"error": "start and end are both required."}
 
     try:
-        sdt = datetime.fromisoformat(start).isoformat()
-        edt = datetime.fromisoformat(end).isoformat()
+        sdt = datetime.fromisoformat(start)
+        edt = datetime.fromisoformat(end)
     except ValueError:
         return {"error": "Invalid date format. Use ISO format (YYYY-MM-DDTHH:MM:SS) for start and end."}
 
@@ -150,8 +150,8 @@ async def get_schedule(network_name: str, start: str = None, end: str = None, in
     edt = None
     if start and end:
         try:
-            sdt = datetime.fromisoformat(start).isoformat()
-            edt = datetime.fromisoformat(end).isoformat()
+            sdt = datetime.fromisoformat(start)
+            edt = datetime.fromisoformat(end)
         except ValueError:
             return {"error": "Invalid date format. Use ISO format (YYYY-MM-DDTHH:MM:SS) for start and end."}
 

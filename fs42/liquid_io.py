@@ -101,7 +101,23 @@ class LiquidIO:
 
             return liquid_blocks
 
+    @staticmethod
+    def _normalize_timestamp(value):
+        if isinstance(value, datetime):
+            return value.isoformat()
+
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value).isoformat()
+            except ValueError:
+                return value
+
+        return value
+
     def query_liquid_blocks(self, station_name: str, start: str, end: str) -> list[LiquidBlock]:
+        start = self._normalize_timestamp(start)
+        end = self._normalize_timestamp(end)
+
         with self._get_connection() as connection:
             cursor = connection.cursor()
             cursor.execute(
@@ -133,6 +149,8 @@ class LiquidIO:
             return liquid_blocks
 
     def query_all_liquid_blocks(self, start: str, end: str) -> dict[str, list[LiquidBlock]]:
+        start = self._normalize_timestamp(start)
+        end = self._normalize_timestamp(end)
 
         with self._get_connection() as connection:
             cursor = connection.cursor()
