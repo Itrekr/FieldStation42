@@ -337,6 +337,84 @@ class TestRandomShowState(unittest.TestCase):
             sorted(episode_paths),
         )
 
+    def test_scan_sequences_caches_random_show_media_per_tag(self):
+        content_dir = os.path.join(self.tmp.name, "content")
+        show_a_dir = os.path.join(content_dir, "pool", "show_a")
+        show_b_dir = os.path.join(content_dir, "pool", "show_b")
+        os.makedirs(os.path.join(show_a_dir, "Season 1"))
+        os.makedirs(os.path.join(show_a_dir, "Season 2"))
+        os.makedirs(os.path.join(show_b_dir, "Season 1"))
+        os.makedirs(os.path.join(show_b_dir, "Season 2"))
+
+        show_files = {
+            show_a_dir: [
+                os.path.join(show_a_dir, "Season 1", "e01.mp4"),
+                os.path.join(show_a_dir, "Season 2", "e02.mp4"),
+            ],
+            show_b_dir: [
+                os.path.join(show_b_dir, "Season 1", "e01.mp4"),
+                os.path.join(show_b_dir, "Season 2", "e02.mp4"),
+            ],
+        }
+
+        def fake_rfind_media(path, media_filter="video"):
+            return show_files.get(path, [])
+
+        conf = {
+            "network_name": "TestTV",
+            "content_dir": content_dir,
+            "clip_shows": {},
+            "monday": {
+                "06:00": {
+                    "sequence": "morning",
+                    "tags": "pool",
+                    "sequence_strategy": "random_show",
+                },
+                "12:00": {
+                    "sequence": "daytime",
+                    "tags": "pool",
+                    "sequence_strategy": "random_show",
+                },
+                "20:00": {
+                    "sequence": "prime",
+                    "tags": "pool",
+                    "sequence_strategy": "random_show",
+                },
+            },
+        }
+
+        with patch("fs42.sequence_api.MediaProcessor._rfind_media", side_effect=fake_rfind_media) as rfind_media:
+            SequenceAPI.scan_sequences(conf)
+
+        self.assertEqual(
+            [call.args[0] for call in rfind_media.call_args_list],
+            [show_a_dir, show_b_dir],
+        )
+
+        sio = SequenceIO()
+        self.assertEqual(
+            sio.get_child_sequences("TestTV", "morning", "pool"),
+            ["pool/show_a", "pool/show_b"],
+        )
+        self.assertEqual(
+            sio.get_child_sequences("TestTV", "daytime", "pool"),
+            ["pool/show_a", "pool/show_b"],
+        )
+        self.assertEqual(
+            sio.get_child_sequences("TestTV", "prime", "pool"),
+            ["pool/show_a", "pool/show_b"],
+        )
+
+        sio.update_current_index("TestTV", "morning", "pool/show_a", 1)
+        self.assertEqual(
+            sio.get_sequence("TestTV", "morning", "pool/show_a").current_index,
+            1,
+        )
+        self.assertEqual(
+            sio.get_sequence("TestTV", "daytime", "pool/show_a").current_index,
+            0,
+        )
+
     def test_symlink_canonical_identity_avoids_same_physical_show(self):
         content_dir = os.path.join(self.tmp.name, "content")
         media_dir = os.path.join(self.tmp.name, "media", "Show X")

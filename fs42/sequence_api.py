@@ -2,6 +2,7 @@ import hashlib
 import logging
 import os
 import random
+import time
 from fs42.timings import DAYS
 from fs42.sequence_io import SequenceIO
 from fs42.media_processor import MediaProcessor
@@ -226,8 +227,9 @@ class SequenceAPI:
 
     @staticmethod
     def scan_sequences(station_config):
+        random_show_cache = {}
         for slot in SequenceAPI._sequence_slots(station_config):
-            SequenceAPI._scan_sequence_slot(station_config, slot)
+            SequenceAPI._scan_sequence_slot(station_config, slot, random_show_cache)
 
     @staticmethod
     def _sequence_slots(station_config):
@@ -268,7 +270,7 @@ class SequenceAPI:
                             yield slot
 
     @staticmethod
-    def _scan_sequence_slot(station_config, slot):
+    def _scan_sequence_slot(station_config, slot, random_show_cache=None):
         if "sequence" not in slot or "tags" not in slot:
             return
 
@@ -286,14 +288,29 @@ class SequenceAPI:
                         f"{slot['sequence']}{slot_tag_index}"
                     )
 
-                    SequenceAPI._build_sequence(station_config, tag, slot_copy)
+                    SequenceAPI._build_sequence(
+                        station_config,
+                        tag,
+                        slot_copy,
+                        random_show_cache,
+                    )
                 else:
-                    SequenceAPI._build_sequence(station_config, tag, slot)
+                    SequenceAPI._build_sequence(
+                        station_config,
+                        tag,
+                        slot,
+                        random_show_cache,
+                    )
         else:
-            SequenceAPI._build_sequence(station_config, slot["tags"], slot)
+            SequenceAPI._build_sequence(
+                station_config,
+                slot["tags"],
+                slot,
+                random_show_cache,
+            )
 
     @staticmethod
-    def _build_sequence(station_config, this_tag, slot):
+    def _build_sequence(station_config, this_tag, slot, random_show_cache=None):
         _l = logging.getLogger("SEQUENCE")
         seq_tag = this_tag
         seq_name = slot.get("effective_sequence",slot["sequence"])
@@ -324,7 +341,12 @@ class SequenceAPI:
                 real_tag
             )
 
-            for show_dir in SequenceAPI._find_show_dirs(base_dir):
+            for show_dir, file_list in SequenceAPI._get_random_show_media(
+                base_dir,
+                real_tag,
+                seq_name,
+                random_show_cache,
+            ):
 
                 relative = os.path.relpath(
                     show_dir,
@@ -356,11 +378,6 @@ class SequenceAPI:
                     child_tag,
                     "random_show",
                 )
-
-                file_list = MediaProcessor._rfind_media(show_dir)
-
-                if not file_list:
-                    continue
 
                 if not existing_child:
 
@@ -660,11 +677,38 @@ class SequenceAPI:
         return True
 
     @staticmethod    
-    def _find_show_dirs(base_dir):
-        show_dirs = []
+    def _get_random_show_media(
+        base_dir,
+        tag=None,
+        sequence_name=None,
+        random_show_cache=None,
+    ):
+        _l = logging.getLogger("SEQUENCE")
+        cache_key = os.path.realpath(base_dir)
+
+        if random_show_cache is not None and cache_key in random_show_cache:
+            if sequence_name:
+                _l.info(
+                    f"Using cached random_show media for sequence "
+                    f"'{sequence_name}'"
+                )
+            return random_show_cache[cache_key]
+
+        if tag:
+            _l.info(
+                f"Scanning random_show media for tag "
+                f"'{tag}'..."
+            )
+
+        start_time = time.monotonic()
+        show_media = []
 
         if not os.path.isdir(base_dir):
-            return show_dirs
+            if random_show_cache is not None:
+                random_show_cache[cache_key] = show_media
+            return show_media
+
+        show_dirs = []
 
         with os.scandir(base_dir) as entries:
             for entry in entries:
@@ -674,9 +718,29 @@ class SequenceAPI:
                 if not entry.is_dir(follow_symlinks=True):
                     continue
 
-                show_dir = entry.path
+                show_dirs.append(entry.path)
 
-                if MediaProcessor._rfind_media(show_dir):
-                    show_dirs.append(show_dir)
+        for show_dir in sorted(show_dirs):
+            file_list = MediaProcessor._rfind_media(show_dir)
+            if file_list:
+                show_media.append((show_dir, file_list))
 
-        return sorted(set(show_dirs))
+        elapsed = time.monotonic() - start_time
+        media_count = sum(len(file_list) for _, file_list in show_media)
+
+        _l.info(
+            f"Found {len(show_media)} shows / {media_count} media files "
+            f"in {elapsed:.1f}s"
+        )
+
+        if random_show_cache is not None:
+            random_show_cache[cache_key] = show_media
+
+        return show_media
+
+    @staticmethod
+    def _find_show_dirs(base_dir):
+        return [
+            show_dir
+            for show_dir, _file_list in SequenceAPI._get_random_show_media(base_dir)
+        ]
