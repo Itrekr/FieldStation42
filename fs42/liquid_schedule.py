@@ -20,6 +20,7 @@ from fs42.station_manager import StationManager
 from fs42.liquid_io import LiquidIO
 from fs42.autobump_agent import AutoBumpAgent
 from fs42.encore_agent import EncoreAgent, EncoreUnavailable
+from fs42.auto_marathon_agent import AutoMarathonAgent
 
 # logging.basicConfig(format="%(asctime)s %(levelname)s:%(name)s:%(message)s", level=logging.INFO)
 
@@ -461,25 +462,43 @@ class LiquidSchedule:
             current_mark = datetime.datetime.now()
 
         forward_buffer = []
+        auto_marathon_queue = []
+        auto_marathon_events = AutoMarathonAgent.scheduled_event_dates(self._blocks)
         encore_agent = EncoreAgent(self.conf, self.catalog)
 
         # build exclusion index from sibling channels that share the same content_dir
         exclusion_index = self._build_exclusion_index(start_time, end_target)
 
         self._l.info(f"Starting to build blocks for {self.conf['network_name']}")
-        while current_mark < end_target:
+        while current_mark < end_target or auto_marathon_queue:
             self._l.debug(f"Making schedule for: {current_mark} {current_mark.weekday()} {current_mark.hour}")
 
-            if not len(forward_buffer):
+            auto_marathon_slot = False
+            if auto_marathon_queue:
+                slot_config = auto_marathon_queue.pop(0)
+                auto_marathon_slot = True
+            elif not len(forward_buffer):
                 slot_config = SlotReader.get_slot(self.conf, current_mark)
             else:
                 slot_config = forward_buffer.pop(0)
+
+            if AutoMarathonAgent.should_start(
+                self.conf,
+                current_mark,
+                slot_config,
+                started_events=auto_marathon_events,
+            ):
+                auto_marathon_queue = AutoMarathonAgent.build_queue(self.conf, current_mark, self.catalog)
+                if auto_marathon_queue:
+                    auto_marathon_events.add(current_mark.date().isoformat())
+                    slot_config = auto_marathon_queue.pop(0)
+                    auto_marathon_slot = True
 
             if slot_config and MarathonAgent.detect_marathon(slot_config, current_mark):
                 forward_buffer = MarathonAgent.fill_marathon(slot_config)
 
             hard_end = self._resolve_hard_end(slot_config, current_mark)
-            if hard_end:
+            if hard_end and not auto_marathon_slot:
                 hard_end = min(hard_end, end_target)
 
             is_encore = bool(slot_config and "encore" in slot_config)

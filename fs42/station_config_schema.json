@@ -223,6 +223,51 @@
             }
           }
         },
+        "auto_marathons": {
+          "type": "object",
+          "description": "Optional deterministic seasonal movie marathon scheduler. When omitted or disabled, normal scheduling is unchanged.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Enable automatic seasonal marathon scheduling for this station only"
+            },
+            "root": {
+              "type": "string",
+              "description": "Marathon root folder relative to content_dir",
+              "default": "marathons"
+            },
+            "start_day": {
+              "type": "string",
+              "enum": ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"],
+              "description": "Day of week on which the marathon may start",
+              "default": "saturday"
+            },
+            "start_hour": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 23,
+              "description": "Hour after which the selected marathon should start",
+              "default": 10
+            },
+            "events_per_season": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Number of deterministic marathon start days per season",
+              "default": 1
+            },
+            "respect_date_overrides": {
+              "type": "boolean",
+              "description": "Exclude days covered by date_overrides from automatic marathon selection",
+              "default": true
+            },
+            "min_titles": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Minimum number of valid media files required for a franchise folder to be eligible",
+              "default": 2
+            }
+          }
+        },
         "day_templates": {
           "type": "object",
           "description": "Named day schedule templates",

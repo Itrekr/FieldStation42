@@ -13,6 +13,7 @@ from fs42.liquid_blocks import ReelBlock
 from fs42.media_processor import MediaProcessor
 from fs42.sequence_api import SequenceAPI
 from fs42.autobump_agent import AutoBumpAgent
+from fs42.auto_marathon_agent import AutoMarathonAgent
 
 
 
@@ -240,6 +241,9 @@ class ShowCatalog:
         # check for fallback tag
         if "fallback_tag" in self.config:
             tags[self.config["fallback_tag"]] = True
+
+        for auto_marathon_tag in AutoMarathonAgent.discover_franchise_tags(self.config):
+            tags[auto_marathon_tag] = True
         
         # add any clip show not already in it
         for clip_tag in self.config["clip_shows"]:
