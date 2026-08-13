@@ -188,7 +188,7 @@ def web_render_runner(user_conf, queue):
 
     # Set environment variables to enable autoplay
     import os
-    os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = '--autoplay-policy=no-user-gesture-required --disable-web-security --allow-running-insecure-content'
+    os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = '--autoplay-policy=no-user-gesture-required'
 
     app = WebRenderApp(user_conf, queue)
 
