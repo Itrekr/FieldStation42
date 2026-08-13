@@ -987,6 +987,15 @@ class SequenceAPI:
             parent_tag
         )
 
+        if active_child and active_child in children:
+            SequenceAPI._ensure_random_show_active_child_in_cycle(
+                station_config,
+                sequence_name,
+                parent_tag,
+                children,
+                active_child,
+            )
+
         if (
             not active_child
             or active_child not in children
@@ -1005,6 +1014,70 @@ class SequenceAPI:
             )
 
         return active_child
+
+    @staticmethod
+    def _ensure_random_show_active_child_in_cycle(
+        station_config,
+        sequence_name,
+        parent_tag,
+        children,
+        active_child,
+    ):
+        if not active_child or active_child not in children:
+            return
+
+        sio = SequenceIO()
+        state = sio.get_sequence_group_shuffle_state(
+            station_config["network_name"],
+            sequence_name,
+            parent_tag,
+        )
+
+        if not state or not state.get("seed") or not state.get("order"):
+            seed = secrets.token_hex(16)
+            remaining = [child for child in children if child != active_child]
+            rng = random.Random(f"{seed}:0:random_show_migration")
+            rng.shuffle(remaining)
+            sio.set_sequence_group_shuffle_state(
+                station_config["network_name"],
+                sequence_name,
+                parent_tag,
+                active_child,
+                seed,
+                0,
+                [active_child] + remaining,
+                1,
+            )
+            return
+
+        order, position, cycle = SequenceAPI._reconcile_random_show_order(
+            state.get("order", []),
+            state.get("position", 0),
+            children,
+            state.get("seed"),
+            state.get("cycle", 0),
+        )
+
+        if active_child not in order[:position]:
+            played = order[:position]
+            remaining = [
+                child
+                for child in order[position:]
+                if child != active_child
+            ]
+            order = played + [active_child] + remaining
+            position = len(played) + 1
+
+        sio.set_sequence_group_shuffle_state(
+            station_config["network_name"],
+            sequence_name,
+            parent_tag,
+            active_child,
+            state.get("seed"),
+            cycle,
+            order,
+            position,
+        )
         
     @staticmethod
     def _normalize_sequence_position(seq):

@@ -3,6 +3,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import datetime
 from unittest.mock import MagicMock, patch
 
 _ffmpeg_stub = MagicMock()
@@ -17,6 +18,8 @@ from fs42.sequence import NamedSequence
 from fs42.sequence_api import SequenceAPI
 from fs42.sequence_io import SequenceIO
 from fs42.station_manager import StationManager
+from fs42.catalog import ShowCatalog
+from fs42.catalog_entry import CatalogEntry
 
 
 def _configure_db(tmp_path):
@@ -65,6 +68,15 @@ def _put_pool(station, sequence_names, show_tags, root="/content", current_index
                 root=root,
                 parent_tag=show_tag.rsplit("/", 1)[0],
             )
+
+
+def _show_name(path):
+    return path.rsplit("/", 2)[1]
+
+
+def _select_show(conf, sequence_name="lane1", parent_tag="pool"):
+    entry = SequenceAPI.get_next_in_sequence(conf, sequence_name, parent_tag, "random_show")
+    return _show_name(entry.fpath)
 
 
 def _group_state_rows(db_path):
@@ -216,6 +228,49 @@ class TestRandomShowState(unittest.TestCase):
             {"show_a", "show_b", "show_c"},
         )
 
+    def test_four_show_pool_exhausts_before_repeat(self):
+        conf = _conf()
+        _put_pool(
+            "TestTV",
+            ["lane1"],
+            ["pool/A", "pool/B", "pool/C", "pool/D"],
+            count=1,
+        )
+
+        first_four = [_select_show(conf) for _ in range(4)]
+
+        self.assertEqual(len(set(first_four)), 4)
+
+    def test_multiple_random_show_cycles_exhaust_each_cycle(self):
+        conf = _conf()
+        _put_pool(
+            "TestTV",
+            ["lane1"],
+            ["pool/A", "pool/B", "pool/C", "pool/D"],
+            count=1,
+        )
+
+        selections = [_select_show(conf) for _ in range(40)]
+
+        for start in range(0, 40, 4):
+            self.assertEqual(
+                set(selections[start:start + 4]),
+                {"A", "B", "C", "D"},
+            )
+
+    def test_no_immediate_repeat_during_unfinished_cycle(self):
+        conf = _conf()
+        _put_pool(
+            "TestTV",
+            ["lane1"],
+            ["pool/A", "pool/B", "pool/C", "pool/D"],
+            count=1,
+        )
+
+        selections = [_select_show(conf) for _ in range(3)]
+
+        self.assertEqual(len(set(selections)), 3)
+
     def test_random_show_bag_has_no_boundary_duplicate(self):
         conf = _conf()
         _put_pool(
@@ -234,6 +289,110 @@ class TestRandomShowState(unittest.TestCase):
             selections[2].rsplit("/", 2)[1],
             selections[3].rsplit("/", 2)[1],
         )
+
+    def test_repeated_subset_selection_uses_subset_local_pool(self):
+        conf = _conf()
+        _put_pool(
+            "TestTV",
+            ["lane1"],
+            ["comedy/A", "comedy/B", "comedy/C"],
+            count=1,
+        )
+        _put_pool(
+            "TestTV",
+            ["lane1"],
+            ["drama/D", "drama/E", "drama/F"],
+            count=1,
+        )
+
+        comedy_1 = _select_show(conf, parent_tag="comedy")
+        comedy_2 = _select_show(conf, parent_tag="comedy")
+        drama_1 = _select_show(conf, parent_tag="drama")
+        comedy_3 = _select_show(conf, parent_tag="comedy")
+        comedy_4 = _select_show(conf, parent_tag="comedy")
+
+        self.assertEqual({comedy_1, comedy_2, comedy_3}, {"A", "B", "C"})
+        self.assertIn(comedy_4, {"A", "B", "C"})
+        self.assertIn(drama_1, {"D", "E", "F"})
+
+    def test_random_show_used_pool_persists_across_sequence_io_instances(self):
+        conf = _conf()
+        _put_pool(
+            "TestTV",
+            ["lane1"],
+            ["pool/A", "pool/B", "pool/C", "pool/D"],
+            count=1,
+        )
+
+        first_two = {_select_show(conf), _select_show(conf)}
+
+        self.assertNotIn(_select_show(conf), first_two)
+
+    def test_existing_active_child_migrates_into_used_pool(self):
+        conf = _conf()
+        _put_pool(
+            "TestTV",
+            ["lane1"],
+            ["pool/A", "pool/B", "pool/C", "pool/D"],
+            count=1,
+        )
+        sio = SequenceIO()
+        sio.set_active_sequence("TestTV", "lane1", "pool", "pool/B")
+
+        self.assertEqual(
+            SequenceAPI._get_active_child_sequence(conf, "lane1", "pool"),
+            "pool/B",
+        )
+        sio.update_current_index("TestTV", "lane1", "pool/B", 1)
+
+        next_three = {_select_show(conf) for _ in range(3)}
+
+        self.assertEqual(next_three, {"A", "C", "D"})
+
+    def test_one_child_random_show_pool_can_repeat(self):
+        conf = _conf()
+        _put_pool("TestTV", ["lane1"], ["pool/A"], count=1)
+
+        self.assertEqual(
+            [_select_show(conf) for _ in range(4)],
+            ["A", "A", "A", "A"],
+        )
+
+    def test_two_child_random_show_pool_alternates_by_cycle(self):
+        conf = _conf()
+        _put_pool("TestTV", ["lane1"], ["pool/A", "pool/B"], count=1)
+
+        selections = [_select_show(conf) for _ in range(8)]
+
+        for start in range(0, 8, 2):
+            self.assertEqual(set(selections[start:start + 2]), {"A", "B"})
+        for previous, current in zip(selections, selections[1:]):
+            self.assertNotEqual(previous, current)
+
+    def test_child_added_mid_cycle_is_unused_without_resetting_played(self):
+        conf = _conf()
+        _put_pool("TestTV", ["lane1"], ["pool/A", "pool/B", "pool/C"], count=1)
+
+        first = _select_show(conf)
+        _put_sequence("TestTV", "lane1", "pool/D", count=1, parent_tag="pool")
+
+        remainder = {_select_show(conf) for _ in range(3)}
+
+        self.assertNotIn(first, remainder)
+        self.assertEqual(remainder, {"A", "B", "C", "D"} - {first})
+
+    def test_child_removed_mid_cycle_does_not_block_cycle_completion(self):
+        conf = _conf()
+        _put_pool("TestTV", ["lane1"], ["pool/A", "pool/B", "pool/C"], count=1)
+
+        first = _select_show(conf)
+        removed = next(show for show in ("A", "B", "C") if show != first)
+        SequenceIO().delete_sequence("TestTV", "lane1", f"pool/{removed}")
+
+        remainder = [_select_show(conf) for _ in range(1)]
+
+        self.assertNotEqual(remainder[0], first)
+        self.assertNotEqual(remainder[0], removed)
 
     def test_random_show_bags_are_independent_by_resolved_parent_tag(self):
         conf = _conf()
@@ -263,6 +422,56 @@ class TestRandomShowState(unittest.TestCase):
 
         self.assertEqual(winter_state["position"], 1)
         self.assertNotEqual(summer_state["seed"], winter_state["seed"])
+
+    def test_sequence_id_array_effective_identities_have_independent_used_pools(self):
+        conf = _conf()
+        _put_pool(
+            "TestTV",
+            ["the_block|block_a", "the_block|block_b"],
+            ["sitcoms/A", "sitcoms/B", "sitcoms/C"],
+            count=1,
+        )
+
+        block_a_first = _select_show(conf, "the_block|block_a", "sitcoms")
+        block_b_first = _select_show(conf, "the_block|block_b", "sitcoms")
+        block_a_second = _select_show(conf, "the_block|block_a", "sitcoms")
+
+        self.assertNotEqual(block_a_first, block_a_second)
+        self.assertIn(block_b_first, {"A", "B", "C"})
+        self.assertEqual(
+            SequenceIO().get_sequence_group_shuffle_state(
+                "TestTV",
+                "the_block|block_a",
+                "sitcoms",
+            )["position"],
+            2,
+        )
+        self.assertEqual(
+            SequenceIO().get_sequence_group_shuffle_state(
+                "TestTV",
+                "the_block|block_b",
+                "sitcoms",
+            )["position"],
+            1,
+        )
+
+    def test_unused_active_elsewhere_is_preferred_over_used_child(self):
+        conf = _conf()
+        _put_pool(
+            "TestTV",
+            ["lane1", "lane2"],
+            ["pool/A", "pool/B", "pool/C"],
+            count=1,
+        )
+        sio = SequenceIO()
+        sio.set_active_sequence("TestTV", "lane2", "pool", "pool/C")
+
+        first = _select_show(conf, "lane1", "pool")
+        second = _select_show(conf, "lane1", "pool")
+        third = _select_show(conf, "lane1", "pool")
+
+        self.assertEqual({first, second, third}, {"A", "B", "C"})
+        self.assertEqual(third, "C")
 
     def test_nested_child_rollover_keeps_group_parent(self):
         conf = _conf()
@@ -559,6 +768,29 @@ class TestRandomShowState(unittest.TestCase):
             )
 
         self.assertEqual(selection, "pool_b/show_y")
+
+    def test_normal_content_lowest_count_selects_unique_items_before_repeat(self):
+        conf = {
+            "network_name": "TestTV",
+            "network_type": "standard",
+            "content_dir": "/content",
+        }
+        catalog = ShowCatalog(conf, load=False)
+        catalog.clip_index["movies"] = [
+            CatalogEntry(f"/content/movies/movie_{letter}.mp4", 60, "movies")
+            for letter in ("a", "b", "c", "d")
+        ]
+
+        selections = [
+            catalog.find_candidate(
+                "movies",
+                120,
+                datetime.datetime(2026, 1, 1, 12),
+            ).path
+            for _ in range(4)
+        ]
+
+        self.assertEqual(len(set(selections)), 4)
 
 
 if __name__ == "__main__":
