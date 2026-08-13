@@ -376,7 +376,7 @@ Sequences allow playing episodes in order from a specific range:
 | Property | Type | Description |
 |----------|------|-------------|
 | `sequence` | string | Sequence identifier |
-| `sequence_strategy` | string | Optional strategy such as `"random_show"` |
+| `sequence_strategy` | string | Optional strategy such as `"random_show"` or `"shuffle"` |
 | `sequence_start` | number | Starting point (0.0 to 1.0) |
 | `sequence_end` | number | Ending point (0.0 to 1.0) |
 | `airing_id` | string | Stable broadcast-history stream to record this selected programme under |
@@ -392,6 +392,21 @@ Example:
 ```
 
 This plays the first half of the `gg-season1` sequence in order.
+
+Use `"sequence_strategy": "shuffle"` to play every video in the resolved tag exactly once in a randomized order. After all videos have played, the tag is reshuffled and a new cycle begins. Shuffle order and position persist between schedule-generation runs.
+
+Example:
+```json
+{
+  "tags": "movies",
+  "sequence": "my_movies",
+  "sequence_strategy": "shuffle"
+}
+```
+
+When combined with `"random_tags": true`, category selection remains random, and each resolved tag maintains its own shuffle cycle for the shared sequence name.
+
+`"sequence_strategy": "random_show"` chooses from immediate child shows under the resolved tag without repeating a child show until all currently eligible child shows have been selected. The chosen show's episodes still play in order until that show completes. Each resolved parent tag maintains its own persisted child-show order, so seasonal or date-based tag changes use the appropriate independent show bag.
 
 `airing_id` is separate from `sequence`: the sequence decides what airs next, while the airing ID names the logical broadcast stream for later encore replay. This is especially useful with `"sequence_strategy": "random_show"` because encores replay the exact historical programme that was scheduled, not the currently active random-show child.
 

@@ -1,4 +1,5 @@
 import sqlite3
+import json
 from contextlib import contextmanager
 
 from fs42.station_manager import StationManager
@@ -39,6 +40,8 @@ class SequenceIO:
                                 current_index INTEGER NOT NULL,
                                 initialized INTEGER NOT NULL DEFAULT 1,
                                 sequence_strategy TEXT,
+                                shuffle_seed TEXT,
+                                shuffle_cycle INTEGER NOT NULL DEFAULT 0,
                                 UNIQUE(station, sequence_name, tag_path)
                             )""")
             try:
@@ -52,6 +55,16 @@ class SequenceIO:
                     raise
             try:
                 cursor.execute("ALTER TABLE named_sequence ADD COLUMN sequence_strategy TEXT")
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e):
+                    raise
+            try:
+                cursor.execute("ALTER TABLE named_sequence ADD COLUMN shuffle_seed TEXT")
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e):
+                    raise
+            try:
+                cursor.execute("ALTER TABLE named_sequence ADD COLUMN shuffle_cycle INTEGER NOT NULL DEFAULT 0")
             except sqlite3.OperationalError as e:
                 if "duplicate column name" not in str(e):
                     raise
@@ -70,6 +83,10 @@ class SequenceIO:
                     sequence_name TEXT NOT NULL,
                     parent_tag TEXT NOT NULL,
                     active_tag_path TEXT NOT NULL,
+                    shuffle_seed TEXT,
+                    shuffle_cycle INTEGER NOT NULL DEFAULT 0,
+                    shuffle_order TEXT,
+                    shuffle_position INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (
                         station,
                         sequence_name,
@@ -77,6 +94,17 @@ class SequenceIO:
                     )
                 )
             """)
+            for column_sql in (
+                "ALTER TABLE sequence_group_state ADD COLUMN shuffle_seed TEXT",
+                "ALTER TABLE sequence_group_state ADD COLUMN shuffle_cycle INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE sequence_group_state ADD COLUMN shuffle_order TEXT",
+                "ALTER TABLE sequence_group_state ADD COLUMN shuffle_position INTEGER NOT NULL DEFAULT 0",
+            ):
+                try:
+                    cursor.execute(column_sql)
+                except sqlite3.OperationalError as e:
+                    if "duplicate column name" not in str(e):
+                        raise
             cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_sequence_entries_named_sequence
             ON sequence_entries(named_sequence_id)
@@ -107,15 +135,17 @@ class SequenceIO:
             cursor.execute(
                 """
                 INSERT OR REPLACE INTO named_sequence
-                    (station, sequence_name, tag_path, start_perc, end_perc, current_index, initialized, parent_tag, sequence_strategy)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (station, sequence_name, tag_path, start_perc, end_perc, current_index, initialized, parent_tag, sequence_strategy, shuffle_seed, shuffle_cycle)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(station, sequence_name, tag_path)
                 DO UPDATE SET
                     start_perc = excluded.start_perc,
                     end_perc = excluded.end_perc,
                     current_index = excluded.current_index,
                     parent_tag = excluded.parent_tag,
-                    sequence_strategy = excluded.sequence_strategy
+                    sequence_strategy = excluded.sequence_strategy,
+                    shuffle_seed = excluded.shuffle_seed,
+                    shuffle_cycle = excluded.shuffle_cycle
                 """,
                 (
                     station_name,
@@ -127,6 +157,8 @@ class SequenceIO:
                     int(named_sequence.initialized),                    
                     getattr(named_sequence, "parent_tag", None),
                     getattr(named_sequence, "sequence_strategy", None),
+                    getattr(named_sequence, "shuffle_seed", None),
+                    getattr(named_sequence, "shuffle_cycle", 0),
                 ),
             )
 
@@ -167,7 +199,7 @@ class SequenceIO:
         with self._get_connection() as connection:
             cursor = connection.cursor()
             cursor.execute(
-                """SELECT id, start_perc, end_perc, current_index, initialized, sequence_strategy, parent_tag
+                """SELECT id, start_perc, end_perc, current_index, initialized, sequence_strategy, parent_tag, shuffle_seed, shuffle_cycle
                               FROM named_sequence 
                               WHERE station = ? AND sequence_name = ? AND tag_path = ?""",
                 (station_name, sequence_name, tag_path),
@@ -177,7 +209,7 @@ class SequenceIO:
             if row is None:
                 return None
 
-            named_sequence_id, start_perc, end_perc, current_index, initialized, sequence_strategy, parent_tag = row
+            named_sequence_id, start_perc, end_perc, current_index, initialized, sequence_strategy, parent_tag, shuffle_seed, shuffle_cycle = row
 
             # Now retrieve the sequence entries
             cursor.execute(
@@ -187,7 +219,7 @@ class SequenceIO:
             )
             file_paths = [row[0] for row in cursor.fetchall()]
 
-            ns = NamedSequence(station_name, sequence_name, tag_path, start_perc, end_perc, current_index, file_paths, bool(initialized), sequence_strategy, parent_tag)
+            ns = NamedSequence(station_name, sequence_name, tag_path, start_perc, end_perc, current_index, file_paths, bool(initialized), sequence_strategy, parent_tag, shuffle_seed, shuffle_cycle)
             
             if ns.initialized != bool(initialized):
                 self.update_initialized(station_name, sequence_name, tag_path, ns.initialized)
@@ -198,7 +230,7 @@ class SequenceIO:
         with self._get_connection() as connection:
             cursor = connection.cursor()
             cursor.execute(
-                """SELECT id, sequence_name, tag_path, start_perc, end_perc, current_index, initialized, sequence_strategy, parent_tag
+                """SELECT id, sequence_name, tag_path, start_perc, end_perc, current_index, initialized, sequence_strategy, parent_tag, shuffle_seed, shuffle_cycle
                               FROM named_sequence
                               WHERE station = ?""",
                 (station_name,),
@@ -210,7 +242,7 @@ class SequenceIO:
 
             sequences = []
             for row in rows:
-                named_sequence_id, sequence_name, tag_path, start_perc, end_perc, current_index, initialized, sequence_strategy, parent_tag = row
+                named_sequence_id, sequence_name, tag_path, start_perc, end_perc, current_index, initialized, sequence_strategy, parent_tag, shuffle_seed, shuffle_cycle = row
 
                 # Now retrieve the sequence entries for this sequence
                 cursor.execute(
@@ -220,7 +252,7 @@ class SequenceIO:
                 )
                 file_paths = [entry_row[0] for entry_row in cursor.fetchall()]
 
-                ns = NamedSequence(station_name, sequence_name, tag_path, start_perc, end_perc, current_index, file_paths, bool(initialized), sequence_strategy, parent_tag)
+                ns = NamedSequence(station_name, sequence_name, tag_path, start_perc, end_perc, current_index, file_paths, bool(initialized), sequence_strategy, parent_tag, shuffle_seed, shuffle_cycle)
                 if ns.initialized != bool(initialized):
                     self.update_initialized(station_name, sequence_name, tag_path, ns.initialized)
                 sequences.append(ns)
@@ -298,6 +330,74 @@ class SequenceIO:
             )
             cursor.close()
             connection.commit()
+
+    def update_shuffle_state(
+        self,
+        station_name: str,
+        sequence_name: str,
+        tag_path: str,
+        order: list,
+        current_index: int,
+        shuffle_cycle: int,
+        shuffle_seed: str = None,
+    ):
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+
+            cursor.execute(
+                "SELECT id FROM named_sequence WHERE station = ? AND sequence_name = ? AND tag_path = ?",
+                (station_name, sequence_name, tag_path),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return False
+
+            named_sequence_id = row[0]
+            cursor.execute("DELETE FROM sequence_entries WHERE named_sequence_id = ?", (named_sequence_id,))
+
+            for idx, fpath in enumerate(str(f) for f in order):
+                cursor.execute(
+                    "INSERT INTO sequence_entries (fpath, sequence_index, named_sequence_id) VALUES (?, ?, ?)",
+                    (fpath, idx, named_sequence_id),
+                )
+
+            if shuffle_seed is None:
+                cursor.execute(
+                    """
+                    UPDATE named_sequence
+                    SET current_index = ?, shuffle_cycle = ?, sequence_strategy = 'shuffle'
+                    WHERE id = ?
+                    """,
+                    (current_index, shuffle_cycle, named_sequence_id),
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE named_sequence
+                    SET current_index = ?, shuffle_cycle = ?, shuffle_seed = ?, sequence_strategy = 'shuffle'
+                    WHERE id = ?
+                    """,
+                    (current_index, shuffle_cycle, shuffle_seed, named_sequence_id),
+                )
+            connection.commit()
+            return True
+
+    def restore_shuffle_state(
+        self,
+        station_name: str,
+        sequence_name: str,
+        tag_path: str,
+        state: dict,
+    ):
+        return self.update_shuffle_state(
+            station_name,
+            sequence_name,
+            tag_path,
+            state.get("order", []),
+            int(state.get("position", 0)),
+            int(state.get("cycle", 0)),
+            state.get("seed"),
+        )
 
     def update_initialized(self, station_name: str, sequence_name: str, tag_path: str, value: bool):
         with self._get_connection() as connection:
@@ -458,7 +558,7 @@ class SequenceIO:
             cursor = connection.cursor()
 
             cursor.execute("""
-                INSERT OR REPLACE INTO sequence_group_state
+                INSERT INTO sequence_group_state
                 (
                     station,
                     sequence_name,
@@ -466,11 +566,100 @@ class SequenceIO:
                     active_tag_path
                 )
                 VALUES (?, ?, ?, ?)
+                ON CONFLICT(station, sequence_name, parent_tag)
+                DO UPDATE SET active_tag_path = excluded.active_tag_path
             """, (
                 station_name,
                 sequence_name,
                 parent_tag,
                 active_tag_path
+            ))
+            connection.commit()
+
+    def get_sequence_group_shuffle_state(
+        self,
+        station_name,
+        sequence_name,
+        parent_tag,
+    ):
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+
+            cursor.execute("""
+                SELECT shuffle_seed, shuffle_cycle, shuffle_order, shuffle_position
+                FROM sequence_group_state
+                WHERE station = ?
+                  AND sequence_name = ?
+                  AND parent_tag = ?
+            """, (
+                station_name,
+                sequence_name,
+                parent_tag,
+            ))
+
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            seed, cycle, order_json, position = row
+            try:
+                order = json.loads(order_json) if order_json else []
+            except json.JSONDecodeError:
+                order = []
+
+            if not isinstance(order, list):
+                order = []
+
+            return {
+                "seed": seed,
+                "cycle": cycle or 0,
+                "order": [str(item) for item in order],
+                "position": position or 0,
+            }
+
+    def set_sequence_group_shuffle_state(
+        self,
+        station_name,
+        sequence_name,
+        parent_tag,
+        active_tag_path,
+        seed,
+        cycle,
+        order,
+        position,
+    ):
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+
+            cursor.execute("""
+                INSERT INTO sequence_group_state
+                (
+                    station,
+                    sequence_name,
+                    parent_tag,
+                    active_tag_path,
+                    shuffle_seed,
+                    shuffle_cycle,
+                    shuffle_order,
+                    shuffle_position
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(station, sequence_name, parent_tag)
+                DO UPDATE SET
+                    active_tag_path = excluded.active_tag_path,
+                    shuffle_seed = excluded.shuffle_seed,
+                    shuffle_cycle = excluded.shuffle_cycle,
+                    shuffle_order = excluded.shuffle_order,
+                    shuffle_position = excluded.shuffle_position
+            """, (
+                station_name,
+                sequence_name,
+                parent_tag,
+                active_tag_path,
+                seed,
+                cycle,
+                json.dumps([str(item) for item in order]),
+                position,
             ))
             connection.commit()
             

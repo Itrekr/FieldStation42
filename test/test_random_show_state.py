@@ -53,7 +53,7 @@ def _put_sequence(station, sequence_name, tag_path, current_index=0, count=2, ro
     )
 
 
-def _put_pool(station, sequence_names, show_tags, root="/content", current_index=0):
+def _put_pool(station, sequence_names, show_tags, root="/content", current_index=0, count=2):
     for sequence_name in sequence_names:
         for show_tag in show_tags:
             _put_sequence(
@@ -61,6 +61,7 @@ def _put_pool(station, sequence_names, show_tags, root="/content", current_index
                 sequence_name,
                 show_tag,
                 current_index=current_index,
+                count=count,
                 root=root,
                 parent_tag=show_tag.rsplit("/", 1)[0],
             )
@@ -192,6 +193,76 @@ class TestRandomShowState(unittest.TestCase):
             sio.get_active_sequence("TestTV", "lane1", "pool"),
             "pool/show_c",
         )
+
+    def test_rollover_exhausts_random_show_bag_before_repeating(self):
+        conf = _conf()
+        _put_pool(
+            "TestTV",
+            ["lane1"],
+            ["pool/show_a", "pool/show_b", "pool/show_c"],
+            count=1,
+        )
+
+        selections = [
+            SequenceAPI.get_next_in_sequence(conf, "lane1", "pool", "random_show").fpath
+            for _ in range(3)
+        ]
+
+        self.assertEqual(
+            {
+                path.rsplit("/", 2)[1]
+                for path in selections
+            },
+            {"show_a", "show_b", "show_c"},
+        )
+
+    def test_random_show_bag_has_no_boundary_duplicate(self):
+        conf = _conf()
+        _put_pool(
+            "TestTV",
+            ["lane1"],
+            ["pool/show_a", "pool/show_b", "pool/show_c"],
+            count=1,
+        )
+
+        selections = [
+            SequenceAPI.get_next_in_sequence(conf, "lane1", "pool", "random_show").fpath
+            for _ in range(4)
+        ]
+
+        self.assertNotEqual(
+            selections[2].rsplit("/", 2)[1],
+            selections[3].rsplit("/", 2)[1],
+        )
+
+    def test_random_show_bags_are_independent_by_resolved_parent_tag(self):
+        conf = _conf()
+        _put_pool(
+            "TestTV",
+            ["lane1"],
+            ["summer/show_a", "summer/show_b"],
+            count=1,
+        )
+        _put_pool(
+            "TestTV",
+            ["lane1"],
+            ["winter/show_a", "winter/show_b"],
+            count=1,
+        )
+
+        SequenceAPI.get_next_in_sequence(conf, "lane1", "summer", "random_show")
+
+        summer_state = SequenceIO().get_sequence_group_shuffle_state("TestTV", "lane1", "summer")
+        winter_state = SequenceIO().get_sequence_group_shuffle_state("TestTV", "lane1", "winter")
+
+        self.assertEqual(summer_state["position"], 1)
+        self.assertIsNone(winter_state)
+
+        SequenceAPI.get_next_in_sequence(conf, "lane1", "winter", "random_show")
+        winter_state = SequenceIO().get_sequence_group_shuffle_state("TestTV", "lane1", "winter")
+
+        self.assertEqual(winter_state["position"], 1)
+        self.assertNotEqual(summer_state["seed"], winter_state["seed"])
 
     def test_nested_child_rollover_keeps_group_parent(self):
         conf = _conf()

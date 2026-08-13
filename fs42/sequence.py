@@ -22,7 +22,9 @@ class NamedSequence:
         file_list: list[str],
         initialized: bool = False,
         sequence_strategy: str = None,
-        parent_tag: str = None
+        parent_tag: str = None,
+        shuffle_seed: str = None,
+        shuffle_cycle: int = 0
     ):
         self.station_name = station_name
         self.sequence_name = sequence_name
@@ -36,6 +38,8 @@ class NamedSequence:
         self.episodes = []  # Initialize episodes as an empty list
         self.start_index = 0
         self.end_index = 0
+        self.shuffle_seed = shuffle_seed
+        self.shuffle_cycle = shuffle_cycle or 0
         self.populate(file_list)  # Populate episodes with the provided file list
 
 
@@ -49,8 +53,10 @@ class NamedSequence:
             entry = SequenceEntry(file)
             self.episodes.append(entry)
 
-        # explicitely sort them by file path for alpha-numeric ordering:
-        self.episodes = sorted(self.episodes, key=lambda entry: entry.fpath)
+        # explicitly sort normal sequences by file path for alpha-numeric ordering.
+        # Shuffle sequences persist their randomized order in the sequence_entries table.
+        if self.sequence_strategy != "shuffle":
+            self.episodes = sorted(self.episodes, key=lambda entry: entry.fpath)
 
         self.end_index = math.floor(self.end_perc * (len(self.episodes)))
 

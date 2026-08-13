@@ -677,8 +677,8 @@
         },
         "sequence_strategy": {
           "type": "string",
-          "enum": ["random_show"],
-          "description": "Optional sequence strategy. random_show picks a child show under the tag and plays it sequentially until completion."
+          "enum": ["random_show", "shuffle"],
+          "description": "Optional sequence strategy. random_show picks each child show under the resolved tag once in randomized order before repeating, and plays the active child show sequentially until completion. shuffle plays every video in the resolved tag once in randomized order before reshuffling."
         },
         "airing_id": {
           "type": "string",

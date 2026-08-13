@@ -127,10 +127,9 @@ class LiquidManager(object):
                     if seq and skey not in _reaped:
                         # register that we found it
                         _reaped[skey] = _block
-                        SequenceAPI.reset_by_episode_path(
+                        SequenceAPI.reset_by_sequence_key(
                             station_config,
-                            _block.sequence_key["sequence_name"],
-                            _block.sequence_key["tag_path"],
+                            _block.sequence_key,
                             _block.content.path,
                         )
 

@@ -2,6 +2,7 @@ import hashlib
 import logging
 import os
 import random
+import secrets
 import time
 from fs42.timings import DAYS
 from fs42.sequence_io import SequenceIO
@@ -76,6 +77,14 @@ class SequenceAPI:
             "sequence_name": sequence_name,
             "tag_path": active_tag_path
         }
+
+        if sequence_strategy == "shuffle":
+            return SequenceAPI._get_next_shuffle_item_with_key(
+                station_config,
+                sequence_name,
+                active_tag_path,
+                sequence_key,
+            )
 
         seq = sio.get_sequence(station_config["network_name"], sequence_name, active_tag_path)
         
@@ -205,6 +214,34 @@ class SequenceAPI:
         else:
             _l.error(f"Episode path {episode_path} not found in sequence {sequence_name}.")
             return False
+
+    @staticmethod
+    def reset_by_sequence_key(station_config, sequence_key, episode_path=None):
+        if sequence_key and sequence_key.get("strategy") == "shuffle":
+            state = sequence_key.get("shuffle_state")
+            if isinstance(state, dict):
+                restored = SequenceIO().restore_shuffle_state(
+                    station_config["network_name"],
+                    sequence_key["sequence_name"],
+                    sequence_key["tag_path"],
+                    state,
+                )
+                if restored:
+                    logging.getLogger("SEQUENCE").info(
+                        f"Restored shuffle sequence {sequence_key['sequence_name']}:{sequence_key['tag_path']} "
+                        f"to cycle {state.get('cycle', 0)} position {state.get('position', 0)}."
+                    )
+                    return True
+
+        if episode_path is None:
+            return False
+
+        return SequenceAPI.reset_by_episode_path(
+            station_config,
+            sequence_key["sequence_name"],
+            sequence_key["tag_path"],
+            episode_path,
+        )
 
     @staticmethod
     def delete_sequences(station_config):
@@ -456,10 +493,22 @@ class SequenceAPI:
                 )
 
             return
+        elif slot.get("sequence_strategy") == "shuffle":
+            file_list = MediaProcessor._rfind_media(f"{station_config['content_dir']}/{real_tag}")
         else:
             file_list = MediaProcessor._rfind_media(f"{station_config['content_dir']}/{real_tag}")
 
-        if not existing:
+        if slot.get("sequence_strategy") == "shuffle":
+            SequenceAPI._build_shuffle_sequence(
+                station_config,
+                seq_name,
+                seq_tag,
+                file_list,
+                existing,
+                seq_start,
+                seq_end,
+            )
+        elif not existing:
             seq_start = 0
             seq_end = 1
             if "sequence_start" in slot:
@@ -492,6 +541,185 @@ class SequenceAPI:
                     station_config["network_name"], seq_name, seq_tag,
                     list(disk_files), current_file, existing.current_index
                 )
+
+    @staticmethod
+    def _build_shuffle_sequence(station_config, seq_name, seq_tag, file_list, existing, seq_start, seq_end):
+        sio = SequenceIO()
+        if not existing or existing.sequence_strategy != "shuffle":
+            seed = secrets.token_hex(16)
+            order = SequenceAPI._new_shuffle_order(file_list, seed, 0)
+            ns = NamedSequence(
+                station_config["network_name"],
+                seq_name,
+                seq_tag,
+                seq_start,
+                seq_end,
+                0,
+                order,
+                True,
+                "shuffle",
+                None,
+                seed,
+                0,
+            )
+            sio.put_sequence(station_config["network_name"], ns)
+            return
+
+        disk_files = set(str(f) for f in file_list)
+        stored_order = [entry.fpath for entry in existing.episodes]
+        stored_files = set(stored_order)
+        if disk_files == stored_files:
+            sio.update_sequence_strategy(
+                station_config["network_name"],
+                seq_name,
+                seq_tag,
+                "shuffle",
+            )
+            return
+
+        reconciled_order, reconciled_index = SequenceAPI._reconcile_shuffle_order(
+            stored_order,
+            existing.current_index,
+            disk_files,
+            existing.shuffle_seed,
+            existing.shuffle_cycle,
+        )
+        sio.update_shuffle_state(
+            station_config["network_name"],
+            seq_name,
+            seq_tag,
+            reconciled_order,
+            reconciled_index,
+            existing.shuffle_cycle,
+            existing.shuffle_seed or secrets.token_hex(16),
+        )
+
+    @staticmethod
+    def _get_next_shuffle_item_with_key(station_config, sequence_name, tag_path, sequence_key):
+        _l = logging.getLogger("SEQUENCE")
+        sio = SequenceIO()
+        seq = sio.get_sequence(station_config["network_name"], sequence_name, tag_path)
+
+        if not seq:
+            _l.warning(f"Shuffle sequence {sequence_name}:{tag_path} missing; rebuilding from catalog.")
+            file_list = MediaProcessor._rfind_media(f"{station_config['content_dir']}/{tag_path}")
+            SequenceAPI._build_shuffle_sequence(station_config, sequence_name, tag_path, file_list, None, 0, 1)
+            seq = sio.get_sequence(station_config["network_name"], sequence_name, tag_path)
+
+        if not seq or not seq.episodes:
+            _l.error(f"Shuffle sequence {sequence_name}:{tag_path} contains no episodes")
+            return None, sequence_key
+
+        needs_state_persist = False
+        if seq.sequence_strategy != "shuffle":
+            _l.warning(
+                f"Sequence {sequence_name}:{tag_path} is marked {seq.sequence_strategy!r}; "
+                f"using shuffle strategy requested by slot."
+            )
+            seq.sequence_strategy = "shuffle"
+            needs_state_persist = True
+
+        if not seq.shuffle_seed:
+            seq.shuffle_seed = secrets.token_hex(16)
+            needs_state_persist = True
+
+        if needs_state_persist:
+            sio.update_shuffle_state(
+                station_config["network_name"],
+                sequence_name,
+                tag_path,
+                [entry.fpath for entry in seq.episodes],
+                seq.current_index,
+                seq.shuffle_cycle,
+                seq.shuffle_seed,
+            )
+            seq = sio.get_sequence(station_config["network_name"], sequence_name, tag_path)
+
+        if seq.current_index < 0 or seq.current_index > len(seq.episodes):
+            _l.warning(
+                f"Shuffle sequence {sequence_name}:{tag_path} has invalid position "
+                f"{seq.current_index}; resetting state."
+            )
+            file_list = MediaProcessor._rfind_media(f"{station_config['content_dir']}/{tag_path}")
+            order = SequenceAPI._new_shuffle_order(file_list, seq.shuffle_seed, seq.shuffle_cycle)
+            sio.update_shuffle_state(
+                station_config["network_name"],
+                sequence_name,
+                tag_path,
+                order,
+                0,
+                seq.shuffle_cycle,
+                seq.shuffle_seed,
+            )
+            seq = sio.get_sequence(station_config["network_name"], sequence_name, tag_path)
+
+        if seq.current_index >= len(seq.episodes):
+            previous_last = seq.episodes[-1].fpath if seq.episodes else None
+            cycle = seq.shuffle_cycle + 1
+            file_list = MediaProcessor._rfind_media(f"{station_config['content_dir']}/{tag_path}")
+            order = SequenceAPI._new_shuffle_order(file_list, seq.shuffle_seed, cycle, previous_last)
+            if not order:
+                _l.error(f"Shuffle sequence {sequence_name}:{tag_path} contains no episodes")
+                return None, sequence_key
+
+            sio.update_shuffle_state(
+                station_config["network_name"],
+                sequence_name,
+                tag_path,
+                order,
+                0,
+                cycle,
+                seq.shuffle_seed,
+            )
+            seq = sio.get_sequence(station_config["network_name"], sequence_name, tag_path)
+
+        order = [entry.fpath for entry in seq.episodes]
+        sequence_key.update(
+            {
+                "strategy": "shuffle",
+                "shuffle_state": {
+                    "seed": seq.shuffle_seed,
+                    "cycle": seq.shuffle_cycle,
+                    "position": seq.current_index,
+                    "order": order,
+                },
+            }
+        )
+
+        next_entry = seq.episodes[seq.current_index]
+        sio.update_current_index(
+            station_config["network_name"],
+            sequence_name,
+            tag_path,
+            seq.current_index + 1,
+        )
+        return next_entry, sequence_key
+
+    @staticmethod
+    def _new_shuffle_order(file_list, seed, cycle, previous_last=None):
+        order = [str(f) for f in file_list]
+        rng = random.Random(f"{seed}:{cycle}")
+        rng.shuffle(order)
+        if len(order) > 1 and order[0] == previous_last:
+            order[0], order[1] = order[1], order[0]
+        return order
+
+    @staticmethod
+    def _reconcile_shuffle_order(stored_order, position, current_files, seed, cycle):
+        position = max(0, min(position, len(stored_order)))
+        played = stored_order[:position]
+        remaining = [
+            fpath
+            for fpath in stored_order[position:]
+            if fpath in current_files
+        ]
+        new_items = list(current_files - set(stored_order))
+        rng = random.Random(f"{seed or ''}:{cycle}:reconcile:{len(stored_order)}:{len(current_files)}")
+        rng.shuffle(new_items)
+        for item in new_items:
+            insert_at = rng.randrange(0, len(remaining) + 1) if remaining else 0
+            remaining.insert(insert_at, item)
+        return played + remaining, position
                 
     @staticmethod
     def _choose_next_child_sequence(
@@ -511,6 +739,122 @@ class SequenceAPI:
         if not children:
             return None
 
+        state = sio.get_sequence_group_shuffle_state(
+            station_config["network_name"],
+            sequence_name,
+            parent_tag,
+        )
+        if not state or not state.get("seed") or not state.get("order"):
+            seed = secrets.token_hex(16)
+            state = {
+                "seed": seed,
+                "cycle": 0,
+                "order": SequenceAPI._new_random_show_order(
+                    children,
+                    seed,
+                    0,
+                    current_tag_path,
+                ),
+                "position": 0,
+            }
+
+        order, position, cycle = SequenceAPI._reconcile_random_show_order(
+            state.get("order", []),
+            state.get("position", 0),
+            children,
+            state.get("seed"),
+            state.get("cycle", 0),
+        )
+
+        if position >= len(order):
+            cycle += 1
+            order = SequenceAPI._new_random_show_order(
+                children,
+                state.get("seed"),
+                cycle,
+                current_tag_path,
+            )
+            position = 0
+
+        selected, order, position = SequenceAPI._take_next_random_show_child(
+            station_config,
+            sequence_name,
+            parent_tag,
+            order,
+            position,
+            current_tag_path,
+        )
+
+        sio.set_sequence_group_shuffle_state(
+            station_config["network_name"],
+            sequence_name,
+            parent_tag,
+            selected,
+            state.get("seed"),
+            cycle,
+            order,
+            position,
+        )
+
+        return selected
+
+    @staticmethod
+    def _take_next_random_show_child(
+        station_config,
+        sequence_name,
+        parent_tag,
+        order,
+        position,
+        current_tag_path=None,
+    ):
+        played = order[:position]
+        remaining = order[position:]
+
+        preferred = [
+            child
+            for child in remaining
+            if SequenceAPI._random_show_child_available(
+                station_config,
+                sequence_name,
+                child,
+                current_tag_path,
+                avoid_active=True,
+            )
+        ]
+
+        if not preferred:
+            preferred = [
+                child
+                for child in remaining
+                if SequenceAPI._random_show_child_available(
+                    station_config,
+                    sequence_name,
+                    child,
+                    current_tag_path,
+                    avoid_active=False,
+                )
+            ]
+
+        if not preferred:
+            preferred = remaining or order
+
+        selected = preferred[0]
+        new_remaining = [child for child in remaining if child != selected]
+        new_order = played + [selected] + new_remaining
+        return selected, new_order, len(played) + 1
+
+    @staticmethod
+    def _random_show_child_available(
+        station_config,
+        sequence_name,
+        child,
+        current_tag_path=None,
+        avoid_active=True,
+    ):
+        if child == current_tag_path:
+            return False
+
+        sio = SequenceIO()
         active_children = set(
             sio.get_all_active_sequences(
                 station_config["network_name"]
@@ -531,57 +875,57 @@ class SequenceAPI:
             current_tag_path
         )
 
-        available = []
+        child_identity = SequenceAPI._child_sequence_identity(
+            station_config,
+            sequence_name,
+            child
+        )
 
-        for child in children:
+        if child_identity and child_identity == current_identity:
+            return False
 
-            if child == current_tag_path:
-                continue
+        if not avoid_active:
+            return True
 
-            if child in active_children:
-                continue
+        if child in active_children:
+            return False
 
-            child_identity = SequenceAPI._child_sequence_identity(
-                station_config,
-                sequence_name,
-                child
-            )
+        if child_identity and child_identity in active_child_identities:
+            return False
 
-            if (
-                child_identity
-                and child_identity == current_identity
-            ):
-                continue
+        return True
 
-            if (
-                child_identity
-                and child_identity in active_child_identities
-            ):
-                continue
+    @staticmethod
+    def _new_random_show_order(children, seed, cycle, previous_child=None):
+        order = [str(child) for child in children]
+        rng = random.Random(f"{seed}:{cycle}:random_show")
+        rng.shuffle(order)
+        if len(order) > 1 and order[0] == previous_child:
+            order[0], order[1] = order[1], order[0]
+        return order
 
-            available.append(child)
-
-        # If every child is already active somewhere, fall back to allowing active children.
-        if not available:
-
-            available = [
-                c
-                for c in children
-                if (
-                    c != current_tag_path
-                    and SequenceAPI._child_sequence_identity(
-                        station_config,
-                        sequence_name,
-                        c
-                    ) != current_identity
-                )
-            ]
-
-        # If literally only one child exists, allow it.
-        if not available:
-            available = children
-
-        return random.choice(available)
+    @staticmethod
+    def _reconcile_random_show_order(stored_order, position, children, seed, cycle):
+        children_set = set(children)
+        position = max(0, min(position or 0, len(stored_order)))
+        played = [
+            child
+            for child in stored_order[:position]
+            if child in children_set
+        ]
+        remaining = [
+            child
+            for child in stored_order[position:]
+            if child in children_set
+        ]
+        known = set(played + remaining)
+        new_children = [child for child in children if child not in known]
+        rng = random.Random(f"{seed or ''}:{cycle}:random_show_reconcile:{len(stored_order)}:{len(children)}")
+        rng.shuffle(new_children)
+        for child in new_children:
+            insert_at = rng.randrange(0, len(remaining) + 1) if remaining else 0
+            remaining.insert(insert_at, child)
+        return played + remaining, len(played), cycle
 
     @staticmethod
     def _child_sequence_identity(

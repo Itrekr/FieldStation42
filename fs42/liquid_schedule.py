@@ -131,10 +131,9 @@ class LiquidSchedule:
             return
 
         sequence_key = block.sequence_key
-        SequenceAPI.reset_by_episode_path(
+        SequenceAPI.reset_by_sequence_key(
             self.conf,
-            sequence_key["sequence_name"],
-            sequence_key["tag_path"],
+            sequence_key,
             block.content.path,
         )
         self._l.info(
