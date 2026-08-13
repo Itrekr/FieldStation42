@@ -3,6 +3,7 @@ import logging
 import os.path
 import sys
 import random
+import secrets
 from pathlib import Path
 
 from fs42.catalog_entry import CatalogEntry, MatchingContentNotFound, NoFillerContentFound
@@ -12,6 +13,7 @@ from fs42.timings import MIN_5, DAYS
 from fs42.liquid_blocks import ReelBlock
 from fs42.media_processor import MediaProcessor
 from fs42.sequence_api import SequenceAPI
+from fs42.sequence_io import SequenceIO
 from fs42.autobump_agent import AutoBumpAgent
 from fs42.auto_marathon_agent import AutoMarathonAgent
 
@@ -503,6 +505,81 @@ class ShowCatalog:
 
         return random.choice(lowest_matches)
 
+    def _shuffle_bag_candidate(self, tag, candidates):
+        by_path = {
+            candidate.path: candidate
+            for candidate in candidates
+        }
+        current_paths = set(by_path)
+        sio = SequenceIO()
+        station = self.config["network_name"]
+        state = sio.get_random_selection_state(station, "content_tag", tag)
+
+        if not state or not state.get("seed") or not state.get("order"):
+            seed = secrets.token_hex(16)
+            cycle = 0
+            order = self._new_content_shuffle_order(current_paths, seed, cycle)
+            position = 0
+        else:
+            seed = state["seed"]
+            cycle = state.get("cycle", 0)
+            order, position = self._reconcile_content_shuffle_order(
+                state.get("order", []),
+                state.get("position", 0),
+                current_paths,
+                seed,
+                cycle,
+            )
+
+        if position >= len(order):
+            previous_last = order[-1] if order else None
+            cycle += 1
+            order = self._new_content_shuffle_order(current_paths, seed, cycle, previous_last)
+            position = 0
+
+        selected_path = order[position]
+        sio.set_random_selection_state(
+            station,
+            "content_tag",
+            tag,
+            seed,
+            cycle,
+            order,
+            position + 1,
+        )
+        return by_path[selected_path]
+
+    @staticmethod
+    def _new_content_shuffle_order(paths, seed, cycle, previous_last=None):
+        order = [str(path) for path in paths]
+        rng = random.Random(f"{seed}:{cycle}:content_tag")
+        rng.shuffle(order)
+        if len(order) > 1 and order[0] == previous_last:
+            order[0], order[1] = order[1], order[0]
+        return order
+
+    @staticmethod
+    def _reconcile_content_shuffle_order(stored_order, position, current_paths, seed, cycle):
+        position = max(0, min(position or 0, len(stored_order)))
+        played = [
+            path
+            for path in stored_order[:position]
+            if path in current_paths
+        ]
+        remaining = [
+            path
+            for path in stored_order[position:]
+            if path in current_paths
+        ]
+        known = set(played + remaining)
+        new_paths = [path for path in current_paths if path not in known]
+        rng = random.Random(f"{seed or ''}:{cycle}:content_tag_reconcile:{len(stored_order)}:{len(current_paths)}")
+        rng.shuffle(new_paths)
+        for path in new_paths:
+            insert_at = rng.randrange(0, len(remaining) + 1) if remaining else 0
+            remaining.insert(insert_at, path)
+        return played + remaining, len(played)
+
     def get_all_by_tag(self, tag):
         if tag in self.clip_index and len(self.clip_index[tag]):
             return self.clip_index[tag]
@@ -552,7 +629,7 @@ class ShowCatalog:
             if not len(matches):
                 err = f"Could not find candidate video for tag={tag} under {seconds} in len - maybe add some shorter content?"
                 raise (MatchingContentNotFound(err))
-            result = self._lowest_count(matches)
+            result = self._shuffle_bag_candidate(tag, matches)
             # note, this has been migrated
             result.count += 1
             # CatalogAPI.set_play_count(self.config, result.path, result.count)

@@ -769,7 +769,30 @@ class TestRandomShowState(unittest.TestCase):
 
         self.assertEqual(selection, "pool_b/show_y")
 
-    def test_normal_content_lowest_count_selects_unique_items_before_repeat(self):
+    def test_normal_content_shuffle_bag_selects_unique_items_before_repeat(self):
+        conf = {
+            "network_name": "TestTV",
+            "network_type": "standard",
+            "content_dir": "/content",
+        }
+        catalog = ShowCatalog(conf, load=False)
+        catalog.clip_index["movies"] = [
+            CatalogEntry(f"/content/movies/movie_{letter}.mp4", 60, "movies", count=count)
+            for letter, count in (("a", 0), ("b", 0), ("c", 5), ("d", 9))
+        ]
+
+        selections = [
+            catalog.find_candidate(
+                "movies",
+                120,
+                datetime.datetime(2026, 1, 1, 12),
+            ).path
+            for _ in range(4)
+        ]
+
+        self.assertEqual(len(set(selections)), 4)
+
+    def test_normal_content_shuffle_bag_multiple_cycles(self):
         conf = {
             "network_name": "TestTV",
             "network_type": "standard",
@@ -787,10 +810,46 @@ class TestRandomShowState(unittest.TestCase):
                 120,
                 datetime.datetime(2026, 1, 1, 12),
             ).path
-            for _ in range(4)
+            for _ in range(8)
         ]
 
-        self.assertEqual(len(set(selections)), 4)
+        self.assertEqual(len(set(selections[:4])), 4)
+        self.assertEqual(len(set(selections[4:])), 4)
+
+    def test_normal_content_shuffle_bag_persists_across_catalog_instances(self):
+        conf = {
+            "network_name": "TestTV",
+            "network_type": "standard",
+            "content_dir": "/content",
+        }
+        first_catalog = ShowCatalog(conf, load=False)
+        first_catalog.clip_index["movies"] = [
+            CatalogEntry(f"/content/movies/movie_{letter}.mp4", 60, "movies")
+            for letter in ("a", "b", "c", "d")
+        ]
+
+        first_two = {
+            first_catalog.find_candidate(
+                "movies",
+                120,
+                datetime.datetime(2026, 1, 1, 12),
+            ).path
+            for _ in range(2)
+        }
+
+        second_catalog = ShowCatalog(conf, load=False)
+        second_catalog.clip_index["movies"] = [
+            CatalogEntry(f"/content/movies/movie_{letter}.mp4", 60, "movies")
+            for letter in ("a", "b", "c", "d")
+        ]
+
+        third = second_catalog.find_candidate(
+            "movies",
+            120,
+            datetime.datetime(2026, 1, 1, 12),
+        ).path
+
+        self.assertNotIn(third, first_two)
 
 
 if __name__ == "__main__":

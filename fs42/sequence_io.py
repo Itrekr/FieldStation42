@@ -124,6 +124,22 @@ class SequenceIO:
             CREATE INDEX IF NOT EXISTS idx_named_sequence_parent
             ON named_sequence(station, sequence_name, parent_tag)
             """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS random_selection_state (
+                    station TEXT NOT NULL,
+                    state_type TEXT NOT NULL,
+                    selector TEXT NOT NULL,
+                    shuffle_seed TEXT NOT NULL,
+                    shuffle_cycle INTEGER NOT NULL DEFAULT 0,
+                    shuffle_order TEXT NOT NULL,
+                    shuffle_position INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (
+                        station,
+                        state_type,
+                        selector
+                    )
+                )
+            """)
             cursor.close()
             connection.commit()
 
@@ -274,6 +290,10 @@ class SequenceIO:
             cursor.execute("""DELETE FROM named_sequence WHERE station = ?""", (station_name,))
             cursor.execute(
                 """DELETE FROM sequence_group_state WHERE station = ?""",
+                (station_name,),
+            )
+            cursor.execute(
+                """DELETE FROM random_selection_state WHERE station = ?""",
                 (station_name,),
             )
             connection.commit()
@@ -656,6 +676,89 @@ class SequenceIO:
                 sequence_name,
                 parent_tag,
                 active_tag_path,
+                seed,
+                cycle,
+                json.dumps([str(item) for item in order]),
+                position,
+            ))
+            connection.commit()
+
+    def get_random_selection_state(
+        self,
+        station_name,
+        state_type,
+        selector,
+    ):
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+
+            cursor.execute("""
+                SELECT shuffle_seed, shuffle_cycle, shuffle_order, shuffle_position
+                FROM random_selection_state
+                WHERE station = ?
+                  AND state_type = ?
+                  AND selector = ?
+            """, (
+                station_name,
+                state_type,
+                selector,
+            ))
+
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            seed, cycle, order_json, position = row
+            try:
+                order = json.loads(order_json) if order_json else []
+            except json.JSONDecodeError:
+                order = []
+
+            if not isinstance(order, list):
+                order = []
+
+            return {
+                "seed": seed,
+                "cycle": cycle or 0,
+                "order": [str(item) for item in order],
+                "position": position or 0,
+            }
+
+    def set_random_selection_state(
+        self,
+        station_name,
+        state_type,
+        selector,
+        seed,
+        cycle,
+        order,
+        position,
+    ):
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+
+            cursor.execute("""
+                INSERT INTO random_selection_state
+                (
+                    station,
+                    state_type,
+                    selector,
+                    shuffle_seed,
+                    shuffle_cycle,
+                    shuffle_order,
+                    shuffle_position
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(station, state_type, selector)
+                DO UPDATE SET
+                    shuffle_seed = excluded.shuffle_seed,
+                    shuffle_cycle = excluded.shuffle_cycle,
+                    shuffle_order = excluded.shuffle_order,
+                    shuffle_position = excluded.shuffle_position
+            """, (
+                station_name,
+                state_type,
+                selector,
                 seed,
                 cycle,
                 json.dumps([str(item) for item in order]),
