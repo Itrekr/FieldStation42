@@ -3,6 +3,7 @@ from PySide6.QtCore import QUrl, QTimer, Qt
 from PySide6.QtWidgets import QApplication, QMainWindow
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEngineSettings
+from PySide6.QtQuick import QQuickWindow, QSGRendererInterface
 
 class WebRender(QMainWindow):
     def __init__(self):
@@ -188,7 +189,10 @@ def web_render_runner(user_conf, queue):
 
     # Set environment variables to enable autoplay
     import os
-    os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = '--autoplay-policy=no-user-gesture-required --disable-web-security --allow-running-insecure-content'
+    os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = '--autoplay-policy=no-user-gesture-required --disable-web-security --allow-running-insecure-content --disable-features=VizDisplayCompositor'
+
+    # Set graphics API before creating QApplication
+    QQuickWindow.setGraphicsApi(QSGRendererInterface.GraphicsApi.Software)
 
     app = WebRenderApp(user_conf, queue)
 
