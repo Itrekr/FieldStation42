@@ -712,7 +712,6 @@
             }
           },
           "required": [
-            "appointment_minutes",
             "interval_days",
             "overflow_days"
           ]

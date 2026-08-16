@@ -1,6 +1,8 @@
 import math
 import random
 
+from fs42.title_parser import TitleParser
+
 
 class SequenceEntry:
     def __init__(self, fpath):
@@ -55,7 +57,15 @@ class NamedSequence:
 
         # explicitly sort normal sequences by file path for alpha-numeric ordering.
         # Shuffle sequences persist their randomized order in the sequence_entries table.
-        if self.sequence_strategy != "shuffle":
+        if self.sequence_strategy == "seasonal_random_show":
+            def seasonal_key(entry):
+                ref = TitleParser.parse_episode_ref(entry.fpath)
+                if not ref:
+                    return (float("inf"), float("inf"), entry.fpath)
+                return (ref.season, ref.episode, entry.fpath)
+
+            self.episodes = sorted(self.episodes, key=seasonal_key)
+        elif self.sequence_strategy != "shuffle":
             self.episodes = sorted(self.episodes, key=lambda entry: entry.fpath)
 
         self.end_index = math.floor(self.end_perc * (len(self.episodes)))

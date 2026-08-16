@@ -17,6 +17,7 @@ class SeasonalRunCompleted(Exception):
 @dataclass(frozen=True)
 class EpisodeRun:
     show_tag: str
+    show_identity: str
     season: int
     start_index: int
     end_index: int
@@ -61,36 +62,121 @@ def meteorological_season_window(when):
 
 class SeasonalRunPlanner:
     @staticmethod
-    def next_run(sequence):
+    def show_identity(sequence, log_invalid=False):
+        refs = SeasonalRunPlanner._episode_refs(sequence, log_invalid=log_invalid)
+        if not refs:
+            return None
+
+        for ref in refs:
+            if ref and ref.season > 0:
+                return SeasonalRunPlanner.normalize_show_identity(ref.show)
+
+        for ref in refs:
+            if ref:
+                return SeasonalRunPlanner.normalize_show_identity(ref.show)
+
+        return None
+
+    @staticmethod
+    def normalize_show_identity(show):
+        return " ".join((show or "").split()).casefold()
+
+    @staticmethod
+    def _episode_refs(sequence, log_invalid=True):
         _l = logging.getLogger("SEQUENCE")
         if not sequence or not sequence.episodes:
             return None
+
+        refs = []
+        seen = set()
+        for entry in sequence.episodes:
+            ref = TitleParser.parse_episode_ref(entry.fpath)
+            if not ref:
+                if log_invalid:
+                    _l.warning(
+                        "[QC] seasonal_random_show: cannot determine season/episode from "
+                        f"{entry.fpath}; excluding {sequence.tag_path} from seasonal selection"
+                    )
+                return None
+
+            if ref.season > 0:
+                logical_episode = (ref.season, ref.episode)
+                if logical_episode in seen:
+                    if log_invalid:
+                        _l.warning(
+                            "[QC] seasonal_random_show: duplicate season/episode "
+                            f"S{ref.season:02}E{ref.episode:02} in {sequence.tag_path}; "
+                            "excluding show from seasonal selection"
+                        )
+                    return None
+                seen.add(logical_episode)
+
+            refs.append(ref)
+
+        return refs
+
+    @staticmethod
+    def _first_normal_index(refs):
+        for index, ref in enumerate(refs):
+            if ref.season > 0:
+                return index
+        return None
+
+    @staticmethod
+    def index_for_progress(sequence, progress=None):
+        refs = SeasonalRunPlanner._episode_refs(sequence)
+        if not refs:
+            return None
+
+        if progress and progress.get("completed"):
+            return SeasonalRunPlanner._first_normal_index(refs)
+
+        if progress and progress.get("next_season") is not None and progress.get("next_episode") is not None:
+            for index, ref in enumerate(refs):
+                if (
+                    ref.season == int(progress["next_season"])
+                    and ref.episode == int(progress["next_episode"])
+                ):
+                    return index
+
+        if progress and progress.get("next_path"):
+            for index, entry in enumerate(sequence.episodes):
+                if entry.fpath == progress["next_path"] and refs[index].season > 0:
+                    return index
 
         index = sequence.current_index
         if index < 0:
             index = 0
 
-        if index >= len(sequence.episodes):
-            index = 0
+        while index < len(refs) and refs[index].season == 0:
+            index += 1
 
-        refs = []
-        for entry in sequence.episodes:
-            ref = TitleParser.parse_episode_ref(entry.fpath)
-            if not ref:
-                _l.warning(
-                    "[QC] seasonal_random_show: cannot determine season/episode from "
-                    f"{entry.fpath}; excluding {sequence.tag_path} from seasonal selection"
-                )
-                return None
-            refs.append(ref)
+        if index >= len(refs):
+            return None
+
+        return index
+
+    @staticmethod
+    def next_run(sequence, progress=None):
+        refs = SeasonalRunPlanner._episode_refs(sequence)
+        if not refs:
+            return None
+
+        index = SeasonalRunPlanner.index_for_progress(sequence, progress)
+        if index is None:
+            return None
 
         season = refs[index].season
+        if season == 0:
+            return None
+
         end_index = index
         while end_index < len(refs) and refs[end_index].season == season:
             end_index += 1
 
         return EpisodeRun(
             show_tag=sequence.tag_path,
+            show_identity=SeasonalRunPlanner.normalize_show_identity(refs[index].show),
             season=season,
             start_index=index,
             end_index=end_index,
@@ -109,12 +195,69 @@ class SeasonalRunPlanner:
         return bool(ref and ref.season == season)
 
     @staticmethod
+    def progress_after_index(sequence, index):
+        refs = SeasonalRunPlanner._episode_refs(sequence)
+        if not refs:
+            return None
+
+        while index < len(refs) and refs[index].season == 0:
+            index += 1
+
+        if index >= len(refs):
+            identity = SeasonalRunPlanner.show_identity(sequence)
+            return {
+                "show_identity": identity,
+                "next_season": None,
+                "next_episode": None,
+                "next_path": None,
+                "completed": True,
+            }
+
+        ref = refs[index]
+        return {
+            "show_identity": SeasonalRunPlanner.normalize_show_identity(ref.show),
+            "next_season": ref.season,
+            "next_episode": ref.episode,
+            "next_path": sequence.episodes[index].fpath,
+            "completed": False,
+        }
+
+    @staticmethod
+    def appointment_capacity_seconds(current_mark, slot_config):
+        seasonal_conf = (slot_config or {}).get("seasonal_run") or {}
+        hard_end_value = (slot_config or {}).get("hard_end")
+        if hard_end_value:
+            parts = hard_end_value.split(":")
+            if len(parts) != 2:
+                raise ValueError(f"Invalid hard_end value {hard_end_value!r}; expected HH:MM")
+            hour = int(parts[0])
+            minute = int(parts[1])
+            hard_end = current_mark.replace(
+                hour=hour,
+                minute=minute,
+                second=0,
+                microsecond=0,
+            )
+            if hard_end <= current_mark:
+                hard_end += datetime.timedelta(days=1)
+            return int((hard_end - current_mark).total_seconds())
+
+        if "appointment_minutes" not in seasonal_conf:
+            raise ValueError(
+                "seasonal_random_show requires seasonal_run.appointment_minutes when hard_end is not set"
+            )
+
+        return seasonal_conf["appointment_minutes"] * 60
+
+    @staticmethod
     def project_run(run, current_mark, slot_config, station_config, catalog):
         seasonal_conf = (slot_config or {}).get("seasonal_run") or {}
-        appointment_minutes = seasonal_conf["appointment_minutes"]
         interval_days = seasonal_conf.get("interval_days", 7)
         overflow_days = seasonal_conf.get("overflow_days", 14)
-        appointment_capacity = appointment_minutes * 60
+        appointment_capacity = SeasonalRunPlanner.appointment_capacity_seconds(
+            current_mark,
+            slot_config,
+        )
 
         appointments = 0
         remaining = 0

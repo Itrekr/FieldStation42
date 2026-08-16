@@ -4,7 +4,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 _ffmpeg_stub = MagicMock()
 _ffmpeg_stub.probe = MagicMock()
@@ -15,6 +15,11 @@ sys.modules.setdefault("moviepy", _moviepy_stub)
 sys.modules.setdefault("moviepy.editor", _moviepy_stub)
 
 from fs42.catalog_entry import CatalogEntry
+from fs42.catalog_api import CatalogAPI
+from fs42.block_plan import BlockPlanEntry
+from fs42.encore_agent import EncoreAgent
+from fs42.liquid_blocks import LiquidBlock, LiquidBoundaryFillBlock
+from fs42.liquid_schedule import LiquidSchedule
 from fs42.seasonal_run import (
     SeasonalRunCompleted,
     SeasonalRunPlanner,
@@ -84,6 +89,23 @@ def _put_show(station, sequence_name, tag, files, current_index=0, parent_tag=No
     )
 
 
+def _entry(path, duration, tag):
+    entry = CatalogEntry(path, duration, tag)
+    entry.realpath = os.path.realpath(path)
+    return entry
+
+
+def _install_entries(conf, entries):
+    CatalogAPI.set_entries(conf, entries)
+
+
+def _simple_plan(block, catalog):
+    if block.content and not isinstance(block.content, list):
+        block.plan = [BlockPlanEntry(block.content.path, 0, block.content.duration)]
+    else:
+        block.plan = []
+
+
 class _Catalog:
     def __init__(self, durations):
         self.durations = durations
@@ -100,6 +122,17 @@ class TestSeasonalRandomShow(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def _run_fluid(self, conf, start, end):
+        StationManager().stations = [conf]
+        with (
+            patch.object(LiquidBlock, "make_plan", _simple_plan),
+            patch.object(LiquidBoundaryFillBlock, "make_plan", _simple_plan),
+            patch.object(CatalogAPI, "update_play_counts", lambda _conf, entries: None),
+        ):
+            schedule = LiquidSchedule(conf)
+            schedule._fluid(start, end)
+            return schedule
 
     def test_episode_ref_parses_show_season_episode(self):
         ref = TitleParser.parse_episode_ref("/media/Lost - S01E02.mkv")
@@ -137,6 +170,40 @@ class TestSeasonalRandomShow(unittest.TestCase):
         seq = SequenceIO().get_sequence("TestTV", "monday_early", "summer/Lost")
         run = SeasonalRunPlanner.next_run(seq)
         self.assertEqual((run.season, run.start_index, run.end_index), (2, 2, 3))
+
+    def test_s00_specials_are_ignored_for_first_run(self):
+        files = [
+            _episode(self.root, "summer/Specials", "Specials", 0, 1),
+            _episode(self.root, "summer/Specials", "Specials", 1, 1),
+            _episode(self.root, "summer/Specials", "Specials", 1, 2),
+        ]
+        _put_show("TestTV", "monday_early", "summer/Specials", files, parent_tag="summer")
+        seq = SequenceIO().get_sequence("TestTV", "monday_early", "summer/Specials")
+        run = SeasonalRunPlanner.next_run(seq)
+        self.assertEqual(run.season, 1)
+        self.assertEqual(run.episode_paths, files[1:])
+
+    def test_parsed_episode_order_overrides_path_order(self):
+        files = [
+            os.path.join(self.root, "summer/Order/Season 10", "Order - S10E01.mkv"),
+            os.path.join(self.root, "summer/Order/Season 2", "Order - S02E01.mkv"),
+            os.path.join(self.root, "summer/Order/Season 1", "Order - S01E01.mkv"),
+        ]
+        _put_show("TestTV", "monday_early", "summer/Order", files, parent_tag="summer")
+        seq = SequenceIO().get_sequence("TestTV", "monday_early", "summer/Order")
+        self.assertEqual(
+            [TitleParser.parse_episode_ref(entry.fpath).season for entry in seq.episodes],
+            [1, 2, 10],
+        )
+
+    def test_duplicate_parsed_episode_makes_show_ineligible(self):
+        files = [
+            os.path.join(self.root, "summer/Dupe/a", "Dupe - S01E03.mkv"),
+            os.path.join(self.root, "summer/Dupe/b", "Dupe - S01E03.mkv"),
+        ]
+        _put_show("TestTV", "monday_early", "summer/Dupe", files, parent_tag="summer")
+        seq = SequenceIO().get_sequence("TestTV", "monday_early", "summer/Dupe")
+        self.assertIsNone(SeasonalRunPlanner.next_run(seq))
 
     def test_halfway_through_season_uses_remainder(self):
         files = [
@@ -215,11 +282,13 @@ class TestSeasonalRandomShow(unittest.TestCase):
             SequenceIO().get_sequence("TestTV", "monday_early", "summer/Short")
         )
         conf = _conf(self.root)
+        slot = _slot()
+        slot.pop("hard_end")
         catalog = _Catalog({path: 44 * 60 for path in files})
         projection = SeasonalRunPlanner.project_run(
             run,
             datetime.datetime(2026, 8, 24, 22, 0),
-            _slot(),
+            slot,
             conf,
             catalog,
         )
@@ -229,7 +298,7 @@ class TestSeasonalRandomShow(unittest.TestCase):
         projection = SeasonalRunPlanner.project_run(
             run,
             datetime.datetime(2026, 8, 24, 22, 1),
-            _slot(),
+            slot,
             conf,
             catalog,
         )
@@ -349,6 +418,68 @@ class TestSeasonalRandomShow(unittest.TestCase):
             2,
         )
 
+    def test_global_progress_across_different_lanes(self):
+        lane1_files = [
+            _episode(self.root, "summer/Lost", "Lost", 1, 1),
+            _episode(self.root, "summer/Lost", "Lost", 1, 2),
+            _episode(self.root, "summer/Lost", "Lost", 2, 1),
+        ]
+        lane2_files = list(lane1_files)
+        _put_show("TestTV", "mon_early", "summer/Lost", lane1_files, current_index=2, parent_tag="summer")
+        _put_show("TestTV", "wed_late", "summer/Lost", lane2_files, current_index=0, parent_tag="summer")
+        SequenceIO().set_seasonal_show_progress(
+            "TestTV",
+            "lost",
+            2,
+            1,
+            lane1_files[2],
+            False,
+        )
+
+        entry, _key = SequenceAPI.get_next_in_sequence_with_key(
+            _conf(self.root),
+            "wed_late",
+            "summer",
+            "seasonal_random_show",
+            current_mark=datetime.datetime(2026, 8, 17, 18, 30),
+            slot_config=_slot(),
+            catalog=_Catalog({path: 44 * 60 for path in lane1_files}),
+        )
+
+        self.assertEqual(entry.fpath, lane1_files[2])
+
+    def test_global_progress_across_seasonal_tags(self):
+        summer_files = [
+            _episode(self.root, "summer/Lost", "Lost", 1, 1),
+            _episode(self.root, "summer/Lost", "Lost", 2, 1),
+        ]
+        autumn_files = [
+            _episode(self.root, "autumn/Lost", "Lost", 1, 1),
+            _episode(self.root, "autumn/Lost", "Lost", 2, 1),
+        ]
+        _put_show("TestTV", "lane", "summer/Lost", summer_files, current_index=1, parent_tag="summer")
+        _put_show("TestTV", "lane", "autumn/Lost", autumn_files, current_index=0, parent_tag="autumn")
+        SequenceIO().set_seasonal_show_progress(
+            "TestTV",
+            "lost",
+            2,
+            1,
+            summer_files[1],
+            False,
+        )
+
+        entry, _key = SequenceAPI.get_next_in_sequence_with_key(
+            _conf(self.root),
+            "lane",
+            "autumn",
+            "seasonal_random_show",
+            current_mark=datetime.datetime(2026, 9, 21, 18, 30),
+            slot_config=dict(_slot(), tags="autumn"),
+            catalog=_Catalog({path: 44 * 60 for path in autumn_files}),
+        )
+
+        self.assertEqual(entry.fpath, autumn_files[1])
+
     def test_no_show_fits_raises_seasonal_unavailable(self):
         files = [
             _episode(self.root, "summer/LongShow", "LongShow", 1, episode)
@@ -397,6 +528,28 @@ class TestSeasonalRandomShow(unittest.TestCase):
         second_show = second_entry.fpath.rsplit(os.sep, 2)[1]
         self.assertNotEqual(first_show, second_show)
 
+    def test_seasonal_duplicate_avoidance_uses_show_identity_across_tags_and_lanes(self):
+        summer_lost = [_episode(self.root, "summer/Lost", "Lost", 1, 1)]
+        autumn_lost = [_episode(self.root, "autumn/Lost", "Lost", 1, 1)]
+        autumn_community = [_episode(self.root, "autumn/Community", "Community", 1, 1)]
+        _put_show("TestTV", "lane1", "summer/Lost", summer_lost, parent_tag="summer")
+        _put_show("TestTV", "lane2", "autumn/Lost", autumn_lost, parent_tag="autumn")
+        _put_show("TestTV", "lane2", "autumn/Community", autumn_community, parent_tag="autumn")
+        SequenceIO().set_seasonal_run_state("TestTV", "lane1", "summer/Lost", "summer", 1)
+
+        entry, key = SequenceAPI.get_next_in_sequence_with_key(
+            _conf(self.root),
+            "lane2",
+            "autumn",
+            "seasonal_random_show",
+            current_mark=datetime.datetime(2026, 9, 21, 18, 30),
+            slot_config=dict(_slot(), tags="autumn"),
+            catalog=_Catalog({path: 44 * 60 for path in summer_lost + autumn_lost + autumn_community}),
+        )
+
+        self.assertEqual(key["tag_path"], "autumn/Community")
+        self.assertIn("Community", entry.fpath)
+
     def test_run_completed_condition_when_state_points_outside_season(self):
         files = [
             _episode(self.root, "summer/ShortShow", "ShortShow", 1, 1),
@@ -434,3 +587,166 @@ class TestSeasonalRandomShow(unittest.TestCase):
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='seasonal_sequence_state'"
             )
             self.assertEqual(cursor.fetchone()[0], "seasonal_sequence_state")
+
+    def test_liquid_rejected_finale_restores_seasonal_transaction(self):
+        conf = _conf(self.root)
+        conf.update(
+            {
+                "network_type": "standard",
+                "commercial_free": True,
+                "monday": {
+                    "18": {
+                        "tags": "summer",
+                        "sequence": "monday_early",
+                        "sequence_strategy": "seasonal_random_show",
+                        "seasonal_run": {
+                            "appointment_minutes": 120,
+                            "interval_days": 7,
+                            "overflow_days": 14,
+                            "fallback_tags": "seasonal_movies/fallback",
+                        },
+                        "airing_id": "weekly_first",
+                        "hard_end": "20:30",
+                    }
+                },
+                "tuesday": {},
+                "wednesday": {},
+                "thursday": {},
+                "friday": {},
+                "saturday": {},
+                "sunday": {},
+            }
+        )
+        files = [
+            _episode(self.root, "summer/Lost", "Lost", 1, 1),
+            _episode(self.root, "summer/Lost", "Lost", 1, 2),
+        ]
+        entries = [
+            _entry(files[0], 44 * 60, "summer/Lost"),
+            _entry(files[1], 150 * 60, "summer/Lost"),
+            _entry(os.path.join(self.root, "seasonal_movies/fallback/movie.mkv"), 60 * 60, "seasonal_movies/fallback"),
+        ]
+        _install_entries(conf, entries)
+        _put_show("TestTV", "monday_early", "summer/Lost", files, current_index=1, parent_tag="summer")
+        sio = SequenceIO()
+        sio.set_seasonal_run_state("TestTV", "monday_early", "summer/Lost", "summer", 1)
+        sio.set_seasonal_show_progress("TestTV", "lost", 1, 2, files[1], False)
+
+        schedule = self._run_fluid(
+            conf,
+            datetime.datetime(2026, 8, 17, 18, 30),
+            datetime.datetime(2026, 8, 17, 20, 30),
+        )
+
+        self.assertEqual(len(schedule._blocks), 1)
+        self.assertNotEqual(getattr(schedule._blocks[0].content, "path", None), files[1])
+        self.assertEqual(
+            sio.get_sequence("TestTV", "monday_early", "summer/Lost").current_index,
+            1,
+        )
+        self.assertEqual(
+            sio.get_seasonal_run_state("TestTV", "monday_early")["active_tag_path"],
+            "summer/Lost",
+        )
+        self.assertEqual(
+            sio.get_seasonal_show_progress("TestTV", "lost")["next_path"],
+            files[1],
+        )
+        retry, _key = SequenceAPI.get_next_in_sequence_with_key(
+            conf,
+            "monday_early",
+            "summer",
+            "seasonal_random_show",
+            current_mark=datetime.datetime(2026, 8, 24, 18, 30),
+            slot_config=conf["monday"]["18"],
+            catalog=_Catalog({entry.path: entry.duration for entry in entries}),
+        )
+        self.assertEqual(retry.fpath, files[1])
+
+    def test_liquid_finale_uses_fallback_without_second_tv_show_or_airing_history(self):
+        conf = _conf(self.root)
+        conf.update(
+            {
+                "network_type": "standard",
+                "commercial_free": True,
+                "monday": {
+                    "18": {
+                        "tags": "summer",
+                        "sequence": "monday_early",
+                        "sequence_strategy": "seasonal_random_show",
+                        "seasonal_run": {
+                            "appointment_minutes": 120,
+                            "interval_days": 7,
+                            "overflow_days": 14,
+                            "fallback_tags": "seasonal_movies/fallback",
+                        },
+                        "airing_id": "weekly_first",
+                        "hard_end": "20:30",
+                    }
+                },
+                "tuesday": {},
+                "wednesday": {},
+                "thursday": {},
+                "friday": {},
+                "saturday": {},
+                "sunday": {},
+            }
+        )
+        files = [
+            _episode(self.root, "summer/Lost", "Lost", 1, 1),
+            _episode(self.root, "summer/Lost", "Lost", 1, 2),
+            _episode(self.root, "summer/Lost", "Lost", 2, 1),
+        ]
+        entries = [
+            _entry(files[0], 44 * 60, "summer/Lost"),
+            _entry(files[1], 44 * 60, "summer/Lost"),
+            _entry(files[2], 44 * 60, "summer/Lost"),
+            _entry(os.path.join(self.root, "seasonal_movies/fallback/movie.mkv"), 30 * 60, "seasonal_movies/fallback"),
+        ]
+        _install_entries(conf, entries)
+        _put_show("TestTV", "monday_early", "summer/Lost", files, current_index=1, parent_tag="summer")
+        sio = SequenceIO()
+        sio.set_seasonal_run_state("TestTV", "monday_early", "summer/Lost", "summer", 1)
+        sio.set_seasonal_show_progress("TestTV", "lost", 1, 2, files[1], False)
+
+        schedule = self._run_fluid(
+            conf,
+            datetime.datetime(2026, 8, 17, 18, 30),
+            datetime.datetime(2026, 8, 17, 20, 30),
+        )
+
+        self.assertEqual([getattr(block.content, "path", None) for block in schedule._blocks], [files[1], entries[3].path])
+        self.assertIsNone(sio.get_seasonal_run_state("TestTV", "monday_early"))
+        progress = sio.get_seasonal_show_progress("TestTV", "lost")
+        self.assertEqual((progress["next_season"], progress["next_episode"]), (2, 1))
+
+        with sqlite3.connect(StationManager().server_conf["db_path"]) as conn:
+            rows = conn.execute(
+                "SELECT airing_id, content_path FROM airing_history WHERE station = ? ORDER BY source_start_time",
+                ("TestTV",),
+            ).fetchall()
+        self.assertEqual(rows, [("weekly_first", files[1])])
+
+    def test_schedule_offset_does_not_accumulate_across_extensions(self):
+        conf = _conf(self.root)
+        conf.update({"network_type": "standard", "schedule_offset": 30})
+        schedule = LiquidSchedule(conf)
+        calls = []
+
+        class Block:
+            def __init__(self, end_time):
+                self.end_time = end_time
+
+        def fake_fluid(start, end):
+            calls.append((start, end))
+            schedule._blocks = [Block(end)]
+
+        with patch.object(schedule, "_fluid", side_effect=fake_fluid):
+            schedule.add_week()
+            schedule.add_week()
+            schedule.add_week()
+
+        self.assertEqual(calls[0][0].minute, 30)
+        self.assertEqual(calls[1][0], calls[0][1])
+        self.assertEqual(calls[2][0], calls[1][1])
+        self.assertEqual([call[0].minute for call in calls], [30, 30, 30])

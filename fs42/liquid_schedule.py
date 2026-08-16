@@ -698,18 +698,21 @@ class LiquidSchedule:
             # then there is no schedule, so start with today (but at midnight)
             now = datetime.datetime.now()
             start_building = now.replace(hour=0, minute=0, second=0, microsecond=0)
-
-        if "schedule_offset" in self.conf:
-            # then we have an offset to apply
-            start_building += datetime.timedelta(minutes=self.conf["schedule_offset"])
+            if "schedule_offset" in self.conf:
+                # then we have an offset to apply
+                start_building += datetime.timedelta(minutes=self.conf["schedule_offset"])
 
         match how_much:
             case "day":
                 end_building = start_building + datetime.timedelta(days=1)
             case "week":
                 end_building = timings.next_week(start_building)
+                if "schedule_offset" in self.conf:
+                    end_building += datetime.timedelta(minutes=self.conf["schedule_offset"])
             case "month":
                 end_building = timings.next_month(start_building)
+                if "schedule_offset" in self.conf:
+                    end_building += datetime.timedelta(minutes=self.conf["schedule_offset"])
         match self.conf["network_type"]:
             case "standard":
                 self._fluid(start_building, end_building)

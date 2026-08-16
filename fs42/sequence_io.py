@@ -154,6 +154,20 @@ class SequenceIO:
                     )
                 )
             """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS seasonal_show_progress (
+                    station TEXT NOT NULL,
+                    show_identity TEXT NOT NULL,
+                    next_season INTEGER,
+                    next_episode INTEGER,
+                    next_path TEXT,
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (
+                        station,
+                        show_identity
+                    )
+                )
+            """)
             cursor.close()
             connection.commit()
 
@@ -312,6 +326,10 @@ class SequenceIO:
             )
             cursor.execute(
                 """DELETE FROM seasonal_sequence_state WHERE station = ?""",
+                (station_name,),
+            )
+            cursor.execute(
+                """DELETE FROM seasonal_show_progress WHERE station = ?""",
                 (station_name,),
             )
             connection.commit()
@@ -701,6 +719,63 @@ class SequenceIO:
             ))
             connection.commit()
 
+    def get_sequence_group_state(
+        self,
+        station_name,
+        sequence_name,
+        parent_tag,
+    ):
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+
+            cursor.execute("""
+                SELECT active_tag_path, shuffle_seed, shuffle_cycle, shuffle_order, shuffle_position
+                FROM sequence_group_state
+                WHERE station = ?
+                  AND sequence_name = ?
+                  AND parent_tag = ?
+            """, (
+                station_name,
+                sequence_name,
+                parent_tag,
+            ))
+
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            active_tag_path, seed, cycle, order_json, position = row
+            try:
+                order = json.loads(order_json) if order_json else []
+            except json.JSONDecodeError:
+                order = []
+
+            if not isinstance(order, list):
+                order = []
+
+            return {
+                "active_tag_path": active_tag_path,
+                "seed": seed,
+                "cycle": cycle or 0,
+                "order": [str(item) for item in order],
+                "position": position or 0,
+            }
+
+    def clear_sequence_group_state(self, station_name, sequence_name, parent_tag):
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute("""
+                DELETE FROM sequence_group_state
+                WHERE station = ?
+                  AND sequence_name = ?
+                  AND parent_tag = ?
+            """, (
+                station_name,
+                sequence_name,
+                parent_tag,
+            ))
+            connection.commit()
+
     def get_random_selection_state(
         self,
         station_name,
@@ -830,6 +905,20 @@ class SequenceIO:
                 "started_at": started_at,
             }
 
+    def restore_seasonal_run_state(self, station_name, sequence_name, state):
+        if not state:
+            self.clear_seasonal_run_state(station_name, sequence_name)
+            return
+
+        self.set_seasonal_run_state(
+            station_name,
+            sequence_name,
+            state["active_tag_path"],
+            state["origin_parent_tag"],
+            state["run_season"],
+            state.get("started_at"),
+        )
+
     def set_seasonal_run_state(
         self,
         station_name,
@@ -901,6 +990,97 @@ class SequenceIO:
                 }
                 for row in cursor.fetchall()
             ]
+
+    def get_seasonal_show_progress(self, station_name, show_identity):
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute("""
+                SELECT next_season, next_episode, next_path, completed
+                FROM seasonal_show_progress
+                WHERE station = ?
+                  AND show_identity = ?
+            """, (
+                station_name,
+                show_identity,
+            ))
+
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            next_season, next_episode, next_path, completed = row
+            return {
+                "show_identity": show_identity,
+                "next_season": next_season,
+                "next_episode": next_episode,
+                "next_path": next_path,
+                "completed": bool(completed),
+            }
+
+    def set_seasonal_show_progress(
+        self,
+        station_name,
+        show_identity,
+        next_season=None,
+        next_episode=None,
+        next_path=None,
+        completed=False,
+    ):
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute("""
+                INSERT INTO seasonal_show_progress
+                (
+                    station,
+                    show_identity,
+                    next_season,
+                    next_episode,
+                    next_path,
+                    completed
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(station, show_identity)
+                DO UPDATE SET
+                    next_season = excluded.next_season,
+                    next_episode = excluded.next_episode,
+                    next_path = excluded.next_path,
+                    completed = excluded.completed
+            """, (
+                station_name,
+                show_identity,
+                next_season,
+                next_episode,
+                next_path,
+                int(bool(completed)),
+            ))
+            connection.commit()
+
+    def clear_seasonal_show_progress(self, station_name, show_identity):
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute("""
+                DELETE FROM seasonal_show_progress
+                WHERE station = ?
+                  AND show_identity = ?
+            """, (
+                station_name,
+                show_identity,
+            ))
+            connection.commit()
+
+    def restore_seasonal_show_progress(self, station_name, show_identity, state):
+        if not state:
+            self.clear_seasonal_show_progress(station_name, show_identity)
+            return
+
+        self.set_seasonal_show_progress(
+            station_name,
+            show_identity,
+            state.get("next_season"),
+            state.get("next_episode"),
+            state.get("next_path"),
+            state.get("completed", False),
+        )
             
     def get_child_sequences(
         self,

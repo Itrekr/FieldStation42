@@ -243,18 +243,32 @@ class SequenceAPI:
             active_tag_path = state["active_tag_path"]
             run_season = int(state["run_season"])
             seq = sio.get_sequence(station, sequence_name, active_tag_path)
+            show_identity = SeasonalRunPlanner.show_identity(seq)
+            progress_before = (
+                sio.get_seasonal_show_progress(station, show_identity)
+                if show_identity
+                else None
+            )
             sequence_key = {
                 "station_name": station,
                 "sequence_name": sequence_name,
                 "tag_path": active_tag_path,
+                "strategy": "seasonal_random_show",
+                "parent_tag": state["origin_parent_tag"],
+                "sequence_index_before": seq.current_index if seq else None,
+                "seasonal_state_before": dict(state),
+                "show_identity": show_identity,
+                "show_progress_before": progress_before,
             }
 
             if not seq or not seq.episodes:
                 sio.clear_seasonal_run_state(station, sequence_name)
                 raise SeasonalRunCompleted()
 
-            if seq.current_index < 0:
-                seq.current_index = 0
+            progress = progress_before
+            synced_index = SeasonalRunPlanner.index_for_progress(seq, progress)
+            if synced_index is not None:
+                seq.current_index = synced_index
 
             if not SeasonalRunPlanner.run_contains_current_index(seq, run_season):
                 sio.clear_seasonal_run_state(station, sequence_name)
@@ -263,6 +277,12 @@ class SequenceAPI:
             next_entry = seq.episodes[seq.current_index]
             seq.current_index += 1
             sio.update_current_index(station, sequence_name, active_tag_path, seq.current_index)
+            SequenceAPI._store_seasonal_progress_after_index(
+                sio,
+                station,
+                seq,
+                seq.current_index,
+            )
             if not SeasonalRunPlanner.run_contains_current_index(seq, run_season):
                 sio.clear_seasonal_run_state(station, sequence_name)
                 sequence_key["seasonal_run_completed_after_entry"] = True
@@ -278,7 +298,13 @@ class SequenceAPI:
             seq = sio.get_sequence(station, sequence_name, child)
             if not seq:
                 continue
-            run = SeasonalRunPlanner.next_run(seq)
+            show_identity = SeasonalRunPlanner.show_identity(seq)
+            progress = (
+                sio.get_seasonal_show_progress(station, show_identity)
+                if show_identity
+                else None
+            )
+            run = SeasonalRunPlanner.next_run(seq, progress)
             if not run:
                 continue
             projection = SeasonalRunPlanner.project_run(
@@ -299,6 +325,11 @@ class SequenceAPI:
             )
             raise SeasonalRunUnavailable()
 
+        group_state_before = sio.get_sequence_group_state(
+            station,
+            sequence_name,
+            tag_path,
+        )
         selected = SequenceAPI._choose_next_eligible_child_sequence(
             station_config,
             sequence_name,
@@ -306,6 +337,9 @@ class SequenceAPI:
             eligible_children,
         )
         run = runs[selected]
+        seq = sio.get_sequence(station, sequence_name, selected)
+        progress_before = sio.get_seasonal_show_progress(station, run.show_identity)
+        sequence_index_before = seq.current_index
         sio.set_seasonal_run_state(
             station,
             sequence_name,
@@ -315,24 +349,48 @@ class SequenceAPI:
             started_at=current_mark.isoformat(),
         )
 
-        seq = sio.get_sequence(station, sequence_name, selected)
-        if seq.current_index >= len(seq.episodes):
-            seq.current_index = 0
-        if seq.current_index < 0:
-            seq.current_index = 0
+        seq.current_index = run.start_index
 
         sequence_key = {
             "station_name": station,
             "sequence_name": sequence_name,
             "tag_path": selected,
+            "strategy": "seasonal_random_show",
+            "parent_tag": tag_path,
+            "sequence_index_before": sequence_index_before,
+            "seasonal_state_before": None,
+            "show_identity": run.show_identity,
+            "show_progress_before": progress_before,
+            "group_state_before": group_state_before,
         }
         next_entry = seq.episodes[seq.current_index]
         seq.current_index += 1
         sio.update_current_index(station, sequence_name, selected, seq.current_index)
+        SequenceAPI._store_seasonal_progress_after_index(
+            sio,
+            station,
+            seq,
+            seq.current_index,
+        )
         if not SeasonalRunPlanner.run_contains_current_index(seq, run.season):
             sio.clear_seasonal_run_state(station, sequence_name)
             sequence_key["seasonal_run_completed_after_entry"] = True
         return next_entry, sequence_key
+
+    @staticmethod
+    def _store_seasonal_progress_after_index(sio, station, seq, index):
+        progress = SeasonalRunPlanner.progress_after_index(seq, index)
+        if not progress or not progress.get("show_identity"):
+            return
+
+        sio.set_seasonal_show_progress(
+            station,
+            progress["show_identity"],
+            progress.get("next_season"),
+            progress.get("next_episode"),
+            progress.get("next_path"),
+            progress.get("completed", False),
+        )
 
     @staticmethod
     def reset_by_episode_path(station_config, sequence_name, tag_path, episode_path):
@@ -356,6 +414,9 @@ class SequenceAPI:
 
     @staticmethod
     def reset_by_sequence_key(station_config, sequence_key, episode_path=None):
+        if sequence_key and sequence_key.get("strategy") == "seasonal_random_show":
+            return SequenceAPI._restore_seasonal_sequence_key(station_config, sequence_key)
+
         if sequence_key and sequence_key.get("strategy") == "shuffle":
             state = sequence_key.get("shuffle_state")
             if isinstance(state, dict):
@@ -381,6 +442,57 @@ class SequenceAPI:
             sequence_key["tag_path"],
             episode_path,
         )
+
+    @staticmethod
+    def _restore_seasonal_sequence_key(station_config, sequence_key):
+        sio = SequenceIO()
+        station = station_config["network_name"]
+        sequence_name = sequence_key["sequence_name"]
+        tag_path = sequence_key["tag_path"]
+
+        if sequence_key.get("sequence_index_before") is not None:
+            sio.update_current_index(
+                station,
+                sequence_name,
+                tag_path,
+                sequence_key["sequence_index_before"],
+            )
+
+        sio.restore_seasonal_run_state(
+            station,
+            sequence_name,
+            sequence_key.get("seasonal_state_before"),
+        )
+
+        show_identity = sequence_key.get("show_identity")
+        if show_identity:
+            sio.restore_seasonal_show_progress(
+                station,
+                show_identity,
+                sequence_key.get("show_progress_before"),
+            )
+
+        if "group_state_before" in sequence_key:
+            parent_tag = sequence_key.get("parent_tag")
+            group_state = sequence_key.get("group_state_before")
+            if group_state:
+                sio.set_sequence_group_shuffle_state(
+                    station,
+                    sequence_name,
+                    parent_tag,
+                    group_state["active_tag_path"],
+                    group_state.get("seed"),
+                    group_state.get("cycle", 0),
+                    group_state.get("order", []),
+                    group_state.get("position", 0),
+                )
+            elif parent_tag:
+                sio.clear_sequence_group_state(station, sequence_name, parent_tag)
+
+        logging.getLogger("SEQUENCE").info(
+            f"Restored seasonal_random_show state for {sequence_name}:{tag_path}"
+        )
+        return True
 
     @staticmethod
     def delete_sequences(station_config):
@@ -1098,11 +1210,12 @@ class SequenceAPI:
                 station_config["network_name"]
             )
         )
+        active_seasonal_runs = sio.get_all_active_seasonal_runs(
+            station_config["network_name"]
+        )
         active_children.update(
             run["active_tag_path"]
-            for run in sio.get_all_active_seasonal_runs(
-                station_config["network_name"]
-            )
+            for run in active_seasonal_runs
         )
         active_child_identities = set(
             SequenceAPI._child_sequence_identity(
@@ -1113,10 +1226,34 @@ class SequenceAPI:
             for active_child in active_children
         )
         active_child_identities.discard(None)
+        active_show_identities = set(
+            SequenceAPI._child_show_identity(
+                station_config,
+                sequence_name,
+                active_child,
+            )
+            for active_child in sio.get_all_active_sequences(
+                station_config["network_name"]
+            )
+        )
+        active_show_identities.update(
+            SequenceAPI._child_show_identity(
+                station_config,
+                run["sequence_name"],
+                run["active_tag_path"],
+            )
+            for run in active_seasonal_runs
+        )
+        active_show_identities.discard(None)
         current_identity = SequenceAPI._child_sequence_identity(
             station_config,
             sequence_name,
             current_tag_path
+        )
+        current_show_identity = SequenceAPI._child_show_identity(
+            station_config,
+            sequence_name,
+            current_tag_path,
         )
 
         child_identity = SequenceAPI._child_sequence_identity(
@@ -1124,8 +1261,15 @@ class SequenceAPI:
             sequence_name,
             child
         )
+        child_show_identity = SequenceAPI._child_show_identity(
+            station_config,
+            sequence_name,
+            child,
+        )
 
         if child_identity and child_identity == current_identity:
+            return False
+        if child_show_identity and child_show_identity == current_show_identity:
             return False
 
         if not avoid_active:
@@ -1135,6 +1279,8 @@ class SequenceAPI:
             return False
 
         if child_identity and child_identity in active_child_identities:
+            return False
+        if child_show_identity and child_show_identity in active_show_identities:
             return False
 
         return True
@@ -1207,6 +1353,23 @@ class SequenceAPI:
             )
 
         return os.path.realpath(tag_path)
+
+    @staticmethod
+    def _child_show_identity(
+        station_config,
+        sequence_name,
+        tag_path,
+    ):
+        if not tag_path:
+            return None
+
+        sio = SequenceIO()
+        seq = sio.get_sequence(
+            station_config["network_name"],
+            sequence_name,
+            tag_path,
+        )
+        return SeasonalRunPlanner.show_identity(seq)
         
     @staticmethod
     def _get_active_child_sequence(
