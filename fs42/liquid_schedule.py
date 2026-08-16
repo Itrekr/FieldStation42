@@ -146,18 +146,7 @@ class LiquidSchedule:
         remaining = (hard_end - current_mark).total_seconds()
         self._l.info(f"Filling {remaining} seconds to hard boundary {hard_end}")
 
-        fallback_tags = []
-        seasonal_run = (slot_config or {}).get("seasonal_run") or {}
-        seasonal_fallback = seasonal_run.get("fallback_tags")
-        if isinstance(seasonal_fallback, list):
-            fallback_tags.extend(seasonal_fallback)
-        elif seasonal_fallback:
-            fallback_tags.append(seasonal_fallback)
-
-        if self.conf.get("fallback_tag"):
-            fallback_tags.append(self.conf["fallback_tag"])
-
-        for fallback_tag in fallback_tags:
+        for fallback_tag, pooled in self._fallback_tag_choices(slot_config):
             try:
                 candidate = self.catalog.find_candidate(
                     fallback_tag,
@@ -169,12 +158,15 @@ class LiquidSchedule:
                 if candidate.duration <= remaining:
                     filler_config = dict(slot_config or {})
                     filler_config["tags"] = fallback_tag
+                    if pooled:
+                        filler_config["pooled_tags"] = True
                     filler_config.pop("sequence", None)
                     filler_config.pop("sequence_strategy", None)
                     filler_config.pop("airing_id", None)
+                    tag_for_breaks = candidate.tag if isinstance(fallback_tag, list) else fallback_tag
                     break_info, break_strategy, _increment = self._break_info(
                         filler_config,
-                        fallback_tag,
+                        tag_for_breaks,
                         candidate.path,
                     )
                     block = LiquidBlock(candidate, current_mark, hard_end, candidate.title, break_strategy, break_info)
@@ -187,6 +179,58 @@ class LiquidSchedule:
             "commercial_dir": (slot_config or {}).get("commercial_dir", self.conf.get("commercial_dir", None)),
         }
         return LiquidBoundaryFillBlock(current_mark, hard_end, "Filler", break_info), hard_end
+
+    def _fallback_tag_choices(self, slot_config=None):
+        slot_config = slot_config or {}
+        seasonal_run = slot_config.get("seasonal_run") or {}
+        choices = []
+
+        def add(value, pooled=False):
+            if not value:
+                return
+            if pooled and isinstance(value, list):
+                choices.append((value, True))
+            elif isinstance(value, list):
+                choices.extend((tag, False) for tag in value)
+            else:
+                choices.append((value, False))
+
+        add(
+            slot_config.get("fallback_tags"),
+            bool(slot_config.get("pooled_fallback_tags")),
+        )
+        add(
+            seasonal_run.get("fallback_tags"),
+            bool(
+                slot_config.get("pooled_fallback_tags")
+                or seasonal_run.get("pooled_fallback_tags")
+            ),
+        )
+        add(self.conf.get("fallback_tag"), False)
+        return choices
+
+    def _fill_fallback(self, slot_config, current_mark, tag_index=None, exclusion_index=None):
+        for fallback_tag, pooled in self._fallback_tag_choices(slot_config):
+            fb_config = dict(slot_config or {})
+            fb_config["tags"] = fallback_tag
+            if pooled:
+                fb_config["pooled_tags"] = True
+            fb_config.pop("sequence", None)
+            fb_config.pop("sequence_strategy", None)
+            fb_config.pop("airing_id", None)
+            fb_config.pop("encore", None)
+            try:
+                return self._fill(
+                    fb_config,
+                    fallback_tag,
+                    current_mark,
+                    tag_index=tag_index,
+                    exclusion_index=exclusion_index,
+                )
+            except MatchingContentNotFound:
+                continue
+
+        raise MatchingContentNotFound("No fallback content available")
 
     def _fill(self, slot_config, tag_str, current_mark, tag_index=None, exclusion_index=None) -> LiquidBlock:
         seq_key = None
@@ -368,6 +412,20 @@ class LiquidSchedule:
         ft = station_conf.get("fallback_tag")
         if ft:
             tags.add(ft)
+        for day in timings.DAYS:
+            for slot in station_conf.get(day, {}).values():
+                if not isinstance(slot, dict):
+                    continue
+                fallback_tags = slot.get("fallback_tags")
+                if isinstance(fallback_tags, list):
+                    tags.update(fallback_tags)
+                elif fallback_tags:
+                    tags.add(fallback_tags)
+                seasonal_fallback = (slot.get("seasonal_run") or {}).get("fallback_tags")
+                if isinstance(seasonal_fallback, list):
+                    tags.update(seasonal_fallback)
+                elif seasonal_fallback:
+                    tags.add(seasonal_fallback)
         return tags
 
     def _build_exclusion_index(self, start_time, end_target):
@@ -554,17 +612,24 @@ class LiquidSchedule:
                     tag_for_breaks = slot_tags if isinstance(slot_tags, str) else candidate.tag
                     new_block, next_mark = self._block_for_candidate(slot_config, tag_for_breaks, current_mark, candidate)
                 except (EncoreUnavailable, ClipShowKickBack, MatchingContentNotFound) as e:
-                    if "fallback_tag" in self.conf:
-                        fb_config = {"tags": self.conf["fallback_tag"]}
-                        new_block, next_mark = self._fill(fb_config, fb_config["tags"], current_mark, exclusion_index=exclusion_index)
-                    else:
+                    try:
+                        new_block, next_mark = self._fill_fallback(
+                            slot_config,
+                            current_mark,
+                            exclusion_index=exclusion_index,
+                        )
+                    except MatchingContentNotFound:
                         self._l.warning("Encore content not found, but no fallback_tag specified.")
                         raise e
 
             elif tag_str is not None:
                 onair_flag = True
 
-                if tag_str not in self.conf["clip_shows"]:
+                is_clip_show = (
+                    isinstance(tag_str, str)
+                    and tag_str in self.conf["clip_shows"]
+                )
+                if not is_clip_show:
                     #print("not clip show")
                     try:
                         new_block, next_mark = self._fill(slot_config, tag_str, current_mark, tag_index=tag_index, exclusion_index=exclusion_index)
@@ -584,10 +649,14 @@ class LiquidSchedule:
                                 f"No seasonal_random_show candidate for tag={tag_str}"
                             )
                     except MatchingContentNotFound as e:
-                        if "fallback_tag" in self.conf:
-                            fb_config = {"tags": self.conf["fallback_tag"]}
-                            new_block, next_mark = self._fill(fb_config, fb_config["tags"], current_mark, tag_index=tag_index, exclusion_index=exclusion_index)
-                        else:
+                        try:
+                            new_block, next_mark = self._fill_fallback(
+                                slot_config,
+                                current_mark,
+                                tag_index=tag_index,
+                                exclusion_index=exclusion_index,
+                            )
+                        except MatchingContentNotFound:
                             self._l.warning("Content not found, but no fallback_tag specified.")
                             raise e
                 else:

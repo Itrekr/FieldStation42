@@ -305,6 +305,119 @@ class TestCatalogCounterSelection(unittest.TestCase):
         }
         self.assertEqual(counts["/content/tag_b/e.mp4"], 4)
 
+    def test_new_item_in_pooled_fallback_tag_gets_pooled_floor(self):
+        conf = _conf()
+        conf["monday"] = {
+            "20": {
+                "encore": {"source": "prime", "strategy": "queue", "cursor": "prime_retry"},
+                "fallback_tags": ["tag_a", "tag_b"],
+                "pooled_fallback_tags": True,
+            }
+        }
+        CatalogAPI.set_entries(
+            conf,
+            [
+                _entry("/content/tag_a/a.mp4", "tag_a", count=4),
+                _entry("/content/tag_b/b.mp4", "tag_b", count=6),
+            ],
+        )
+
+        CatalogAPI.set_entries(
+            conf,
+            [
+                _entry("/content/tag_a/a.mp4", "tag_a"),
+                _entry("/content/tag_b/b.mp4", "tag_b"),
+                _entry("/content/tag_b/c.mp4", "tag_b"),
+            ],
+        )
+
+        counts = {
+            entry.path: entry.count
+            for entry in CatalogAPI.get_entries(conf)
+        }
+        self.assertEqual(counts["/content/tag_b/c.mp4"], 4)
+
+    def test_fluid_pooled_tags_slot_uses_combined_candidate_set(self):
+        conf = _conf()
+        conf["monday"] = {
+            "20": {
+                "tags": ["tag_a", "tag_b"],
+                "pooled_tags": True,
+            }
+        }
+        entries = [
+            _entry("/content/tag_a/a.mp4", "tag_a", count=5),
+            _entry("/content/tag_b/b.mp4", "tag_b", count=4),
+        ]
+        CatalogAPI.set_entries(conf, entries)
+        StationManager().stations = [conf]
+
+        with (
+            patch.object(LiquidBlock, "make_plan", _simple_plan),
+            patch.object(CatalogAPI, "update_play_counts", lambda _conf, entries: None),
+        ):
+            schedule = LiquidSchedule(conf)
+            schedule._fluid(
+                datetime.datetime(2026, 6, 1, 20),
+                datetime.datetime(2026, 6, 1, 21),
+            )
+
+        self.assertEqual(schedule._blocks[0].content.path, "/content/tag_b/b.mp4")
+
+    def test_unavailable_encore_uses_pooled_slot_fallback_tags(self):
+        conf = _conf()
+        conf["monday"] = {
+            "20": {
+                "encore": {"source": "prime", "strategy": "queue", "cursor": "prime_retry"},
+                "fallback_tags": ["tag_a", "tag_b"],
+                "pooled_fallback_tags": True,
+                "hard_end": "21:00",
+            }
+        }
+        entries = [
+            _entry("/content/tag_a/a.mp4", "tag_a", count=5, duration=30 * 60),
+            _entry("/content/tag_b/b.mp4", "tag_b", count=4, duration=30 * 60),
+        ]
+        CatalogAPI.set_entries(conf, entries)
+        StationManager().stations = [conf]
+
+        with (
+            patch.object(LiquidBlock, "make_plan", _simple_plan),
+            patch.object(CatalogAPI, "update_play_counts", lambda _conf, entries: None),
+        ):
+            schedule = LiquidSchedule(conf)
+            schedule._fluid(
+                datetime.datetime(2026, 6, 1, 20),
+                datetime.datetime(2026, 6, 1, 21),
+            )
+
+        self.assertEqual(schedule._blocks[0].content.path, "/content/tag_b/b.mp4")
+
+    def test_seasonal_boundary_filler_can_pool_fallback_tags(self):
+        conf = _conf()
+        slot = {
+            "seasonal_run": {
+                "fallback_tags": ["tag_a", "tag_b"],
+                "pooled_fallback_tags": True,
+            },
+            "hard_end": "21:00",
+        }
+        entries = [
+            _entry("/content/tag_a/a.mp4", "tag_a", count=5, duration=30 * 60),
+            _entry("/content/tag_b/b.mp4", "tag_b", count=4, duration=30 * 60),
+        ]
+        CatalogAPI.set_entries(conf, entries)
+        schedule = LiquidSchedule(conf)
+
+        block, next_mark = schedule._fill_to_boundary(
+            datetime.datetime(2026, 6, 1, 20),
+            datetime.datetime(2026, 6, 1, 21),
+            slot,
+        )
+
+        self.assertEqual(block.content.path, "/content/tag_b/b.mp4")
+        self.assertEqual(next_mark, datetime.datetime(2026, 6, 1, 21))
+
     def test_accepted_candidate_updates_in_memory_count_for_next_selection(self):
         conf = _conf()
         conf["monday"] = {

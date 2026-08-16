@@ -27,6 +27,8 @@ class ConfigProcessor:
         "seasonal_run",
         "random_tags",
         "pooled_tags",
+        "fallback_tags",
+        "pooled_fallback_tags",
         "video_scramble_fx",
         "marathon",
     ]

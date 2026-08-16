@@ -33,11 +33,21 @@ class CatalogAPI:
         groups = []
 
         def harvest(slot):
-            if not isinstance(slot, dict) or not slot.get("pooled_tags"):
+            if not isinstance(slot, dict):
                 return
-            tags = slot.get("tags")
-            if isinstance(tags, list) and tags:
-                groups.append(set(tags))
+            if slot.get("pooled_tags"):
+                tags = slot.get("tags")
+                if isinstance(tags, list) and tags:
+                    groups.append(set(tags))
+            if slot.get("pooled_fallback_tags"):
+                fallback_tags = slot.get("fallback_tags")
+                if isinstance(fallback_tags, list) and fallback_tags:
+                    groups.append(set(fallback_tags))
+            seasonal_run = slot.get("seasonal_run") or {}
+            if seasonal_run.get("pooled_fallback_tags") or slot.get("pooled_fallback_tags"):
+                fallback_tags = seasonal_run.get("fallback_tags")
+                if isinstance(fallback_tags, list) and fallback_tags:
+                    groups.append(set(fallback_tags))
 
         for day in DAYS:
             for slot in station_config.get(day, {}).values():

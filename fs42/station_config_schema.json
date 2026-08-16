@@ -709,6 +709,10 @@
                   }
                 }
               ]
+            },
+            "pooled_fallback_tags": {
+              "type": "boolean",
+              "description": "Pool seasonal fallback_tags into one ordinary content candidate set"
             }
           },
           "required": [
@@ -790,6 +794,24 @@
         "pooled_tags": {
           "type": "boolean",
           "description": "Pool a list of ordinary content tags into one candidate set before applying eligibility and least-played selection"
+        },
+        "fallback_tags": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "Slot-level fallback tag or tags for ordinary fallback content"
+        },
+        "pooled_fallback_tags": {
+          "type": "boolean",
+          "description": "Pool fallback_tags into one ordinary content candidate set"
         },
         "marathon": {
           "type": "object",

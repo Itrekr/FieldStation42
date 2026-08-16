@@ -169,6 +169,20 @@ class ShowCatalog:
             else:
                 tags[slot["tags"]] = True
 
+        fallback_tags = slot.get("fallback_tags")
+        if isinstance(fallback_tags, list):
+            for tag in fallback_tags:
+                tags[tag] = True
+        elif fallback_tags:
+            tags[fallback_tags] = True
+
+        seasonal_fallback = (slot.get("seasonal_run") or {}).get("fallback_tags")
+        if isinstance(seasonal_fallback, list):
+            for tag in seasonal_fallback:
+                tags[tag] = True
+        elif seasonal_fallback:
+            tags[seasonal_fallback] = True
+
         if "bump_dir" in slot:
             bump_overrides[slot["bump_dir"]] = True
         if "commercial_dir" in slot:
