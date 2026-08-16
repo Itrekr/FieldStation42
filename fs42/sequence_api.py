@@ -335,7 +335,14 @@ class SequenceAPI:
             sequence_name,
             tag_path,
             eligible_children,
+            allow_active_fallback=False,
         )
+        if not selected:
+            _l.info(
+                f"No inactive eligible seasonal_random_show candidate for "
+                f"{sequence_name}:{tag_path} at {current_mark}"
+            )
+            raise SeasonalRunUnavailable()
         run = runs[selected]
         seq = sio.get_sequence(station, sequence_name, selected)
         progress_before = sio.get_seasonal_show_progress(station, run.show_identity)
@@ -1056,6 +1063,7 @@ class SequenceAPI:
         parent_tag,
         eligible_children,
         current_tag_path=None,
+        allow_active_fallback=True,
     ):
         sio = SequenceIO()
         children = sio.get_child_sequences(
@@ -1123,7 +1131,12 @@ class SequenceAPI:
             position,
             current_tag_path,
             eligible_children=eligible,
+            allow_active_fallback=allow_active_fallback,
+            strict_seasonal_active=not allow_active_fallback,
         )
+
+        if not selected:
+            return None
 
         sio.set_sequence_group_shuffle_state(
             station_config["network_name"],
@@ -1147,6 +1160,8 @@ class SequenceAPI:
         position,
         current_tag_path=None,
         eligible_children=None,
+        allow_active_fallback=True,
+        strict_seasonal_active=False,
     ):
         played = order[:position]
         remaining = order[position:]
@@ -1156,16 +1171,25 @@ class SequenceAPI:
             child
             for child in remaining
             if eligible_children is None or child in eligible_children
-            if SequenceAPI._random_show_child_available(
+            if (
+                SequenceAPI._seasonal_child_available(
+                    station_config,
+                    sequence_name,
+                    child,
+                    current_tag_path,
+                )
+                if strict_seasonal_active
+                else SequenceAPI._random_show_child_available(
                 station_config,
                 sequence_name,
                 child,
                 current_tag_path,
                 avoid_active=True,
+                )
             )
         ]
 
-        if not preferred:
+        if not preferred and allow_active_fallback:
             preferred = [
                 child
                 for child in remaining
@@ -1179,7 +1203,7 @@ class SequenceAPI:
                 )
             ]
 
-        if not preferred:
+        if not preferred and allow_active_fallback:
             if eligible_children is None:
                 preferred = remaining or order
             else:
@@ -1187,6 +1211,9 @@ class SequenceAPI:
                     child for child in (remaining or order)
                     if child in eligible_children
                 ]
+
+        if not preferred:
+            return None, order, position
 
         selected = preferred[0]
         new_remaining = [child for child in remaining if child != selected]
@@ -1282,6 +1309,44 @@ class SequenceAPI:
             return False
         if child_show_identity and child_show_identity in active_show_identities:
             return False
+
+        return True
+
+    @staticmethod
+    def _seasonal_child_available(
+        station_config,
+        sequence_name,
+        child,
+        current_tag_path=None,
+    ):
+        if child == current_tag_path:
+            return False
+
+        child_show_identity = SequenceAPI._child_show_identity(
+            station_config,
+            sequence_name,
+            child,
+        )
+        current_show_identity = SequenceAPI._child_show_identity(
+            station_config,
+            sequence_name,
+            current_tag_path,
+        )
+        if child_show_identity and child_show_identity == current_show_identity:
+            return False
+
+        sio = SequenceIO()
+        for run in sio.get_all_active_seasonal_runs(station_config["network_name"]):
+            if run["sequence_name"] == sequence_name and run["active_tag_path"] == child:
+                continue
+
+            active_show_identity = SequenceAPI._child_show_identity(
+                station_config,
+                run["sequence_name"],
+                run["active_tag_path"],
+            )
+            if child_show_identity and child_show_identity == active_show_identity:
+                return False
 
         return True
 

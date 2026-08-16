@@ -550,6 +550,152 @@ class TestSeasonalRandomShow(unittest.TestCase):
         self.assertEqual(key["tag_path"], "autumn/Community")
         self.assertIn("Community", entry.fpath)
 
+    def test_only_fitting_candidate_active_elsewhere_is_unavailable(self):
+        show_a = [_episode(self.root, "autumn/ShowA", "ShowA", 1, 1)]
+        show_b = [
+            _episode(self.root, "autumn/ShowB", "ShowB", 1, episode)
+            for episode in range(1, 25)
+        ]
+        _put_show("TestTV", "lane1", "autumn/ShowA", show_a, parent_tag="autumn")
+        _put_show("TestTV", "lane2", "autumn/ShowA", show_a, parent_tag="autumn")
+        _put_show("TestTV", "lane2", "autumn/ShowB", show_b, parent_tag="autumn")
+        SequenceIO().set_seasonal_run_state("TestTV", "lane1", "autumn/ShowA", "autumn", 1)
+
+        with self.assertRaises(SeasonalRunUnavailable):
+            SequenceAPI.get_next_in_sequence_with_key(
+                _conf(self.root),
+                "lane2",
+                "autumn",
+                "seasonal_random_show",
+                current_mark=datetime.datetime(2026, 11, 24, 18, 30),
+                slot_config=dict(_slot(), tags="autumn"),
+                catalog=_Catalog({path: 44 * 60 for path in show_a + show_b}),
+            )
+
+    def test_liquid_active_only_candidate_uses_seasonal_fallback(self):
+        conf = _conf(self.root)
+        conf.update(
+            {
+                "network_type": "standard",
+                "commercial_free": True,
+                "monday": {
+                    "18": {
+                        "tags": "autumn",
+                        "sequence": "lane2",
+                        "sequence_strategy": "seasonal_random_show",
+                        "seasonal_run": {
+                            "appointment_minutes": 120,
+                            "interval_days": 7,
+                            "overflow_days": 14,
+                            "fallback_tags": "seasonal_movies/fallback",
+                        },
+                        "airing_id": "weekly_first",
+                        "hard_end": "20:30",
+                    }
+                },
+                "tuesday": {},
+                "wednesday": {},
+                "thursday": {},
+                "friday": {},
+                "saturday": {},
+                "sunday": {},
+            }
+        )
+        show_a = [_episode(self.root, "autumn/ShowA", "ShowA", 1, 1)]
+        show_b = [
+            _episode(self.root, "autumn/ShowB", "ShowB", 1, episode)
+            for episode in range(1, 25)
+        ]
+        fallback = os.path.join(self.root, "seasonal_movies/fallback/movie.mkv")
+        entries = (
+            [_entry(path, 44 * 60, "autumn/ShowA") for path in show_a]
+            + [_entry(path, 44 * 60, "autumn/ShowB") for path in show_b]
+            + [_entry(fallback, 60 * 60, "seasonal_movies/fallback")]
+        )
+        _install_entries(conf, entries)
+        _put_show("TestTV", "lane1", "autumn/ShowA", show_a, parent_tag="autumn")
+        _put_show("TestTV", "lane2", "autumn/ShowA", show_a, parent_tag="autumn")
+        _put_show("TestTV", "lane2", "autumn/ShowB", show_b, parent_tag="autumn")
+        SequenceIO().set_seasonal_run_state("TestTV", "lane1", "autumn/ShowA", "autumn", 1)
+
+        schedule = self._run_fluid(
+            conf,
+            datetime.datetime(2026, 11, 23, 18, 30),
+            datetime.datetime(2026, 11, 23, 20, 30),
+        )
+
+        self.assertEqual(len(schedule._blocks), 1)
+        self.assertEqual(schedule._blocks[0].content.path, fallback)
+        self.assertIsNone(SequenceIO().get_seasonal_run_state("TestTV", "lane2"))
+
+    def test_active_show_exclusion_does_not_consume_random_bag(self):
+        show_a = [_episode(self.root, "autumn/ShowA", "ShowA", 1, 1)]
+        show_b = [
+            _episode(self.root, "autumn/ShowB", "ShowB", 1, episode)
+            for episode in range(1, 25)
+        ]
+        _put_show("TestTV", "lane1", "autumn/ShowA", show_a, parent_tag="autumn")
+        _put_show("TestTV", "lane2", "autumn/ShowA", show_a, parent_tag="autumn")
+        _put_show("TestTV", "lane2", "autumn/ShowB", show_b, parent_tag="autumn")
+        sio = SequenceIO()
+        sio.set_seasonal_run_state("TestTV", "lane1", "autumn/ShowA", "autumn", 1)
+        sio.set_sequence_group_shuffle_state(
+            "TestTV",
+            "lane2",
+            "autumn",
+            "autumn/ShowA",
+            "seed",
+            0,
+            ["autumn/ShowA", "autumn/ShowB"],
+            0,
+        )
+
+        with self.assertRaises(SeasonalRunUnavailable):
+            SequenceAPI.get_next_in_sequence_with_key(
+                _conf(self.root),
+                "lane2",
+                "autumn",
+                "seasonal_random_show",
+                current_mark=datetime.datetime(2026, 11, 24, 18, 30),
+                slot_config=dict(_slot(), tags="autumn"),
+                catalog=_Catalog({path: 44 * 60 for path in show_a + show_b}),
+            )
+
+        state = sio.get_sequence_group_shuffle_state("TestTV", "lane2", "autumn")
+        self.assertEqual(state["position"], 0)
+        self.assertEqual(state["order"][0], "autumn/ShowA")
+
+        sio.clear_seasonal_run_state("TestTV", "lane1")
+        entry, key = SequenceAPI.get_next_in_sequence_with_key(
+            _conf(self.root),
+            "lane2",
+            "autumn",
+            "seasonal_random_show",
+            current_mark=datetime.datetime(2026, 11, 24, 18, 30),
+            slot_config=dict(_slot(), tags="autumn"),
+            catalog=_Catalog({path: 44 * 60 for path in show_a + show_b}),
+        )
+        self.assertEqual(key["tag_path"], "autumn/ShowA")
+        self.assertEqual(entry.fpath, show_a[0])
+
+    def test_same_show_other_seasonal_tag_active_with_no_alternative_is_unavailable(self):
+        summer_lost = [_episode(self.root, "summer/Lost", "Lost", 1, 1)]
+        autumn_lost = [_episode(self.root, "autumn/Lost", "Lost", 1, 1)]
+        _put_show("TestTV", "lane1", "summer/Lost", summer_lost, parent_tag="summer")
+        _put_show("TestTV", "lane2", "autumn/Lost", autumn_lost, parent_tag="autumn")
+        SequenceIO().set_seasonal_run_state("TestTV", "lane1", "summer/Lost", "summer", 1)
+
+        with self.assertRaises(SeasonalRunUnavailable):
+            SequenceAPI.get_next_in_sequence_with_key(
+                _conf(self.root),
+                "lane2",
+                "autumn",
+                "seasonal_random_show",
+                current_mark=datetime.datetime(2026, 9, 21, 18, 30),
+                slot_config=dict(_slot(), tags="autumn"),
+                catalog=_Catalog({path: 44 * 60 for path in summer_lost + autumn_lost}),
+            )
+
     def test_run_completed_condition_when_state_points_outside_season(self):
         files = [
             _episode(self.root, "summer/ShortShow", "ShortShow", 1, 1),
