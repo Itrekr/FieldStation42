@@ -5,7 +5,6 @@ import sys
 sys.path.append(os.getcwd())
 import logging
 import datetime
-import math
 
 from fs42.catalog import ShowCatalog, MatchingContentNotFound
 from fs42.slot_reader import SlotReader
@@ -21,6 +20,8 @@ from fs42.liquid_io import LiquidIO
 from fs42.autobump_agent import AutoBumpAgent
 from fs42.encore_agent import EncoreAgent, EncoreUnavailable
 from fs42.auto_marathon_agent import AutoMarathonAgent
+from fs42.schedule_math import effective_schedule_increment, rounded_schedule_duration
+from fs42.seasonal_run import SeasonalRunCompleted, SeasonalRunUnavailable
 
 # logging.basicConfig(format="%(asctime)s %(levelname)s:%(name)s:%(message)s", level=logging.INFO)
 
@@ -39,13 +40,9 @@ class LiquidSchedule:
         self._load_blocks()
 
     def _calc_target_duration(self, duration, increment=None):
-        # get the target duration for the show based on the schedule increment
         if increment is None:
             increment = self.conf["schedule_increment"]
-        multiple = increment * 60
-        if multiple == 0:
-            return duration
-        return multiple * math.ceil(duration / multiple)
+        return rounded_schedule_duration(duration, increment)
 
     def _load_blocks(self):
         self._blocks = LiquidAPI.get_blocks(self.conf)
@@ -148,8 +145,18 @@ class LiquidSchedule:
         remaining = (hard_end - current_mark).total_seconds()
         self._l.info(f"Filling {remaining} seconds to hard boundary {hard_end}")
 
-        fallback_tag = self.conf.get("fallback_tag")
-        if fallback_tag:
+        fallback_tags = []
+        seasonal_run = (slot_config or {}).get("seasonal_run") or {}
+        seasonal_fallback = seasonal_run.get("fallback_tags")
+        if isinstance(seasonal_fallback, list):
+            fallback_tags.extend(seasonal_fallback)
+        elif seasonal_fallback:
+            fallback_tags.append(seasonal_fallback)
+
+        if self.conf.get("fallback_tag"):
+            fallback_tags.append(self.conf["fallback_tag"])
+
+        for fallback_tag in fallback_tags:
             try:
                 candidate = self.catalog.find_candidate(
                     fallback_tag,
@@ -189,7 +196,7 @@ class LiquidSchedule:
         if "sequence" in slot_config:
             seq_name = slot_config["sequence"]
             
-            if slot_config.get("sequence_strategy") == "random_show" and tag_index is not None:
+            if slot_config.get("sequence_strategy") in {"random_show", "seasonal_random_show"} and tag_index is not None:
                 seq_ids = slot_config.get("sequence_id_array", [])
                     
                 if tag_index < len(seq_ids):
@@ -203,7 +210,10 @@ class LiquidSchedule:
                 self.conf,
                 seq_name,
                 tag_str,
-                sequence_strategy
+                sequence_strategy,
+                current_mark=current_mark,
+                slot_config=slot_config,
+                catalog=self.catalog,
             )
             if next_seq:
                 candidate = self.catalog.entry_by_fpath(next_seq.fpath)
@@ -291,7 +301,12 @@ class LiquidSchedule:
         break_info["commercial_dir"] = slot_config.get("commercial_dir", self.conf.get("commercial_dir", None))
 
         break_strategy = slot_config.get("break_strategy", self.conf["break_strategy"])
-        increment = slot_config.get("schedule_increment", self.conf["schedule_increment"])
+        increment = effective_schedule_increment(
+            self.conf,
+            slot_config,
+            tag_str,
+            candidate_path,
+        )
 
         #now determine if we have a tag level override
         if "tag_overrides" in self.conf:
@@ -311,7 +326,6 @@ class LiquidSchedule:
                 break_info["bump_dir"] = override.get("bump_dir", break_info["bump_dir"])
                 break_info["commercial_dir"] = override.get("commercial_dir", break_info["commercial_dir"])
                 break_strategy = override.get("break_strategy", break_strategy)
-                increment = override.get("schedule_increment", increment)
 
         return (break_info, break_strategy, increment)
 
@@ -508,6 +522,7 @@ class LiquidSchedule:
 
             new_block = None
             encore_key = None
+            seasonal_fallback_used = False
             onair_flag = True
             if is_encore:
                 onair_flag = True
@@ -533,6 +548,19 @@ class LiquidSchedule:
                         new_block, next_mark = self._fill(slot_config, tag_str, current_mark, tag_index=tag_index, exclusion_index=exclusion_index)
                     except ClipShowKickBack as e:
                         new_block, next_mark = self._clip_fill(e.clip_tag, current_mark, slot_config)
+                    except (SeasonalRunUnavailable, SeasonalRunCompleted):
+                        if hard_end:
+                            new_block, next_mark = self._fill_to_boundary(
+                                current_mark,
+                                hard_end,
+                                slot_config,
+                                exclusion_index=exclusion_index,
+                            )
+                            seasonal_fallback_used = True
+                        else:
+                            raise MatchingContentNotFound(
+                                f"No seasonal_random_show candidate for tag={tag_str}"
+                            )
                     except MatchingContentNotFound as e:
                         if "fallback_tag" in self.conf:
                             fb_config = {"tags": self.conf["fallback_tag"]}
@@ -573,7 +601,11 @@ class LiquidSchedule:
                 else:
                     new_block = LiquidOffAirBlock(candidate, current_mark, next_mark, "Offair", sign_off=sign_off)
 
-            accepted_source_airing_id = slot_config.get("airing_id") if slot_config else None
+            accepted_source_airing_id = (
+                None
+                if seasonal_fallback_used
+                else slot_config.get("airing_id") if slot_config else None
+            )
             if hard_end and not self._block_fits_boundary(new_block, hard_end):
                 self._l.info(
                     f"Candidate {new_block.title} would end at {new_block.end_time}, "
@@ -595,6 +627,27 @@ class LiquidSchedule:
             elif encore_key:
                 new_block.encore_key = encore_key
                 encore_agent.record_consumption(encore_key)
+
+            if (
+                hard_end
+                and new_block
+                and getattr(new_block, "sequence_key", None)
+                and new_block.sequence_key.get("seasonal_run_completed_after_entry")
+                and new_block.end_time < hard_end
+            ):
+                new_blocks.append(new_block)
+                encore_agent.record_airing(accepted_source_airing_id, new_block)
+                self._register_exclusion(exclusion_index, new_block)
+                filler_block, next_mark = self._fill_to_boundary(
+                    new_block.end_time,
+                    hard_end,
+                    slot_config,
+                    exclusion_index=exclusion_index,
+                )
+                new_blocks.append(filler_block)
+                self._register_exclusion(exclusion_index, filler_block)
+                current_mark = next_mark
+                continue
 
             new_blocks.append(new_block)
             encore_agent.record_airing(accepted_source_airing_id, new_block)

@@ -140,6 +140,20 @@ class SequenceIO:
                     )
                 )
             """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS seasonal_sequence_state (
+                    station TEXT NOT NULL,
+                    sequence_name TEXT NOT NULL,
+                    active_tag_path TEXT NOT NULL,
+                    origin_parent_tag TEXT NOT NULL,
+                    run_season INTEGER NOT NULL,
+                    started_at TEXT,
+                    PRIMARY KEY (
+                        station,
+                        sequence_name
+                    )
+                )
+            """)
             cursor.close()
             connection.commit()
 
@@ -294,6 +308,10 @@ class SequenceIO:
             )
             cursor.execute(
                 """DELETE FROM random_selection_state WHERE station = ?""",
+                (station_name,),
+            )
+            cursor.execute(
+                """DELETE FROM seasonal_sequence_state WHERE station = ?""",
                 (station_name,),
             )
             connection.commit()
@@ -784,6 +802,104 @@ class SequenceIO:
             return [
                 r[0]
                 for r in cursor.fetchall()
+            ]
+
+    def get_seasonal_run_state(self, station_name, sequence_name):
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+
+            cursor.execute("""
+                SELECT active_tag_path, origin_parent_tag, run_season, started_at
+                FROM seasonal_sequence_state
+                WHERE station = ?
+                  AND sequence_name = ?
+            """, (
+                station_name,
+                sequence_name,
+            ))
+
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            active_tag_path, origin_parent_tag, run_season, started_at = row
+            return {
+                "active_tag_path": active_tag_path,
+                "origin_parent_tag": origin_parent_tag,
+                "run_season": run_season,
+                "started_at": started_at,
+            }
+
+    def set_seasonal_run_state(
+        self,
+        station_name,
+        sequence_name,
+        active_tag_path,
+        origin_parent_tag,
+        run_season,
+        started_at=None,
+    ):
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute("""
+                INSERT INTO seasonal_sequence_state
+                (
+                    station,
+                    sequence_name,
+                    active_tag_path,
+                    origin_parent_tag,
+                    run_season,
+                    started_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(station, sequence_name)
+                DO UPDATE SET
+                    active_tag_path = excluded.active_tag_path,
+                    origin_parent_tag = excluded.origin_parent_tag,
+                    run_season = excluded.run_season,
+                    started_at = excluded.started_at
+            """, (
+                station_name,
+                sequence_name,
+                active_tag_path,
+                origin_parent_tag,
+                run_season,
+                started_at,
+            ))
+            connection.commit()
+
+    def clear_seasonal_run_state(self, station_name, sequence_name):
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute("""
+                DELETE FROM seasonal_sequence_state
+                WHERE station = ?
+                  AND sequence_name = ?
+            """, (
+                station_name,
+                sequence_name,
+            ))
+            connection.commit()
+
+    def get_all_active_seasonal_runs(self, station_name):
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute("""
+                SELECT sequence_name, active_tag_path, origin_parent_tag, run_season, started_at
+                FROM seasonal_sequence_state
+                WHERE station = ?
+            """, (
+                station_name,
+            ))
+            return [
+                {
+                    "sequence_name": row[0],
+                    "active_tag_path": row[1],
+                    "origin_parent_tag": row[2],
+                    "run_season": row[3],
+                    "started_at": row[4],
+                }
+                for row in cursor.fetchall()
             ]
             
     def get_child_sequences(

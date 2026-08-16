@@ -677,8 +677,45 @@
         },
         "sequence_strategy": {
           "type": "string",
-          "enum": ["random_show", "shuffle"],
-          "description": "Optional sequence strategy. random_show picks each child show under the resolved tag once in randomized order before repeating, and plays the active child show sequentially until completion. shuffle plays every video in the resolved tag once in randomized order before reshuffling."
+          "enum": ["random_show", "seasonal_random_show", "shuffle"],
+          "description": "Optional sequence strategy. random_show picks each child show under the resolved tag once in randomized order before repeating, and plays the active child show sequentially until completion. seasonal_random_show selects bounded season-aware child runs. shuffle plays every video in the resolved tag once in randomized order before reshuffling."
+        },
+        "seasonal_run": {
+          "type": "object",
+          "properties": {
+            "appointment_minutes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "interval_days": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 7
+            },
+            "overflow_days": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 14
+            },
+            "fallback_tags": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "appointment_minutes",
+            "interval_days",
+            "overflow_days"
+          ]
         },
         "airing_id": {
           "type": "string",

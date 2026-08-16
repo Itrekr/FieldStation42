@@ -8,6 +8,11 @@ from fs42.timings import DAYS
 from fs42.sequence_io import SequenceIO
 from fs42.media_processor import MediaProcessor
 from fs42.sequence import NamedSequence, SequenceEntry
+from fs42.seasonal_run import (
+    SeasonalRunCompleted,
+    SeasonalRunPlanner,
+    SeasonalRunUnavailable,
+)
 
 class SequenceAPI:
     @staticmethod
@@ -58,10 +63,29 @@ class SequenceAPI:
         return next_entry
 
     @staticmethod
-    def get_next_in_sequence_with_key(station_config, sequence_name, tag_path, sequence_strategy=None):
+    def get_next_in_sequence_with_key(
+        station_config,
+        sequence_name,
+        tag_path,
+        sequence_strategy=None,
+        *,
+        current_mark=None,
+        slot_config=None,
+        catalog=None,
+    ):
         _l = logging.getLogger("SEQUENCE")
         sio = SequenceIO()
         group_parent_tag = tag_path
+
+        if sequence_strategy == "seasonal_random_show":
+            return SequenceAPI._get_next_seasonal_random_show_with_key(
+                station_config,
+                sequence_name,
+                tag_path,
+                current_mark=current_mark,
+                slot_config=slot_config,
+                catalog=catalog,
+            )
 
         if sequence_strategy == "random_show":
             active_tag_path = SequenceAPI._get_active_child_sequence(
@@ -196,6 +220,121 @@ class SequenceAPI:
         return next_entry, sequence_key
 
     @staticmethod
+    def _get_next_seasonal_random_show_with_key(
+        station_config,
+        sequence_name,
+        tag_path,
+        *,
+        current_mark=None,
+        slot_config=None,
+        catalog=None,
+    ):
+        _l = logging.getLogger("SEQUENCE")
+        if current_mark is None or slot_config is None or catalog is None:
+            raise SeasonalRunUnavailable(
+                "seasonal_random_show requires current_mark, slot_config, and catalog"
+            )
+
+        sio = SequenceIO()
+        station = station_config["network_name"]
+        state = sio.get_seasonal_run_state(station, sequence_name)
+
+        if state:
+            active_tag_path = state["active_tag_path"]
+            run_season = int(state["run_season"])
+            seq = sio.get_sequence(station, sequence_name, active_tag_path)
+            sequence_key = {
+                "station_name": station,
+                "sequence_name": sequence_name,
+                "tag_path": active_tag_path,
+            }
+
+            if not seq or not seq.episodes:
+                sio.clear_seasonal_run_state(station, sequence_name)
+                raise SeasonalRunCompleted()
+
+            if seq.current_index < 0:
+                seq.current_index = 0
+
+            if not SeasonalRunPlanner.run_contains_current_index(seq, run_season):
+                sio.clear_seasonal_run_state(station, sequence_name)
+                raise SeasonalRunCompleted()
+
+            next_entry = seq.episodes[seq.current_index]
+            seq.current_index += 1
+            sio.update_current_index(station, sequence_name, active_tag_path, seq.current_index)
+            if not SeasonalRunPlanner.run_contains_current_index(seq, run_season):
+                sio.clear_seasonal_run_state(station, sequence_name)
+                sequence_key["seasonal_run_completed_after_entry"] = True
+            return next_entry, sequence_key
+
+        children = sio.get_child_sequences(station, sequence_name, tag_path)
+        if not children:
+            raise SeasonalRunUnavailable()
+
+        eligible_children = []
+        runs = {}
+        for child in children:
+            seq = sio.get_sequence(station, sequence_name, child)
+            if not seq:
+                continue
+            run = SeasonalRunPlanner.next_run(seq)
+            if not run:
+                continue
+            projection = SeasonalRunPlanner.project_run(
+                run,
+                current_mark,
+                slot_config,
+                station_config,
+                catalog,
+            )
+            if projection.eligible:
+                eligible_children.append(child)
+                runs[child] = run
+
+        if not eligible_children:
+            _l.info(
+                f"No eligible seasonal_random_show candidate for "
+                f"{sequence_name}:{tag_path} at {current_mark}"
+            )
+            raise SeasonalRunUnavailable()
+
+        selected = SequenceAPI._choose_next_eligible_child_sequence(
+            station_config,
+            sequence_name,
+            tag_path,
+            eligible_children,
+        )
+        run = runs[selected]
+        sio.set_seasonal_run_state(
+            station,
+            sequence_name,
+            selected,
+            tag_path,
+            run.season,
+            started_at=current_mark.isoformat(),
+        )
+
+        seq = sio.get_sequence(station, sequence_name, selected)
+        if seq.current_index >= len(seq.episodes):
+            seq.current_index = 0
+        if seq.current_index < 0:
+            seq.current_index = 0
+
+        sequence_key = {
+            "station_name": station,
+            "sequence_name": sequence_name,
+            "tag_path": selected,
+        }
+        next_entry = seq.episodes[seq.current_index]
+        seq.current_index += 1
+        sio.update_current_index(station, sequence_name, selected, seq.current_index)
+        if not SeasonalRunPlanner.run_contains_current_index(seq, run.season):
+            sio.clear_seasonal_run_state(station, sequence_name)
+            sequence_key["seasonal_run_completed_after_entry"] = True
+        return next_entry, sequence_key
+
+    @staticmethod
     def reset_by_episode_path(station_config, sequence_name, tag_path, episode_path):
         _l = logging.getLogger("SEQUENCE")
         sio = SequenceIO()
@@ -315,7 +454,7 @@ class SequenceAPI:
         if isinstance(slot["tags"], list):
             for tag_index, tag in enumerate(slot["tags"]):
                 slot_copy = dict(slot)
-                if slot.get("sequence_strategy") == "random_show":
+                if SequenceAPI._is_show_group_strategy(slot.get("sequence_strategy")):
                     slot_tag_array = slot.get('sequence_id_array')
                     slot_tag_index = ""
                     if slot_tag_array is not None:
@@ -369,7 +508,7 @@ class SequenceAPI:
         seq_start = slot.get("sequence_start", 0)
         seq_end = slot.get("sequence_end", 1)
 
-        if slot.get("sequence_strategy") == "random_show":
+        if SequenceAPI._is_show_group_strategy(slot.get("sequence_strategy")):
 
             seen_child_tags = set()
 
@@ -413,7 +552,7 @@ class SequenceAPI:
                     station_config["network_name"],
                     seq_name,
                     child_tag,
-                    "random_show",
+                    slot.get("sequence_strategy"),
                 )
 
                 if not existing_child:
@@ -427,7 +566,7 @@ class SequenceAPI:
                         0,
                         file_list,
                         False,
-                        "random_show",
+                        slot.get("sequence_strategy"),
                         seq_tag
                     )
 
@@ -799,6 +938,95 @@ class SequenceAPI:
         return selected
 
     @staticmethod
+    def _choose_next_eligible_child_sequence(
+        station_config,
+        sequence_name,
+        parent_tag,
+        eligible_children,
+        current_tag_path=None,
+    ):
+        sio = SequenceIO()
+        children = sio.get_child_sequences(
+            station_config["network_name"],
+            sequence_name,
+            parent_tag
+        )
+        eligible = set(eligible_children)
+        children = [child for child in children if child in eligible]
+
+        if not children:
+            return None
+
+        state = sio.get_sequence_group_shuffle_state(
+            station_config["network_name"],
+            sequence_name,
+            parent_tag,
+        )
+        if not state or not state.get("seed") or not state.get("order"):
+            seed = secrets.token_hex(16)
+            all_children = sio.get_child_sequences(
+                station_config["network_name"],
+                sequence_name,
+                parent_tag
+            )
+            state = {
+                "seed": seed,
+                "cycle": 0,
+                "order": SequenceAPI._new_random_show_order(
+                    all_children,
+                    seed,
+                    0,
+                    current_tag_path,
+                ),
+                "position": 0,
+            }
+
+        all_children = sio.get_child_sequences(
+            station_config["network_name"],
+            sequence_name,
+            parent_tag
+        )
+        order, position, cycle = SequenceAPI._reconcile_random_show_order(
+            state.get("order", []),
+            state.get("position", 0),
+            all_children,
+            state.get("seed"),
+            state.get("cycle", 0),
+        )
+        if position >= len(order):
+            cycle += 1
+            order = SequenceAPI._new_random_show_order(
+                all_children,
+                state.get("seed"),
+                cycle,
+                current_tag_path,
+            )
+            position = 0
+
+        selected, order, position = SequenceAPI._take_next_random_show_child(
+            station_config,
+            sequence_name,
+            parent_tag,
+            order,
+            position,
+            current_tag_path,
+            eligible_children=eligible,
+        )
+
+        sio.set_sequence_group_shuffle_state(
+            station_config["network_name"],
+            sequence_name,
+            parent_tag,
+            selected,
+            state.get("seed"),
+            cycle,
+            order,
+            position,
+        )
+
+        return selected
+
+    @staticmethod
     def _take_next_random_show_child(
         station_config,
         sequence_name,
@@ -806,13 +1034,16 @@ class SequenceAPI:
         order,
         position,
         current_tag_path=None,
+        eligible_children=None,
     ):
         played = order[:position]
         remaining = order[position:]
+        eligible_children = set(eligible_children) if eligible_children is not None else None
 
         preferred = [
             child
             for child in remaining
+            if eligible_children is None or child in eligible_children
             if SequenceAPI._random_show_child_available(
                 station_config,
                 sequence_name,
@@ -826,6 +1057,7 @@ class SequenceAPI:
             preferred = [
                 child
                 for child in remaining
+                if eligible_children is None or child in eligible_children
                 if SequenceAPI._random_show_child_available(
                     station_config,
                     sequence_name,
@@ -836,7 +1068,13 @@ class SequenceAPI:
             ]
 
         if not preferred:
-            preferred = remaining or order
+            if eligible_children is None:
+                preferred = remaining or order
+            else:
+                preferred = [
+                    child for child in (remaining or order)
+                    if child in eligible_children
+                ]
 
         selected = preferred[0]
         new_remaining = [child for child in remaining if child != selected]
@@ -857,6 +1095,12 @@ class SequenceAPI:
         sio = SequenceIO()
         active_children = set(
             sio.get_all_active_sequences(
+                station_config["network_name"]
+            )
+        )
+        active_children.update(
+            run["active_tag_path"]
+            for run in sio.get_all_active_seasonal_runs(
                 station_config["network_name"]
             )
         )
@@ -1161,3 +1405,7 @@ class SequenceAPI:
             show_dir
             for show_dir, _file_list in SequenceAPI._get_random_show_media(base_dir)
         ]
+
+    @staticmethod
+    def _is_show_group_strategy(strategy):
+        return strategy in {"random_show", "seasonal_random_show"}

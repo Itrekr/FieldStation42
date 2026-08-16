@@ -1,8 +1,35 @@
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 
+@dataclass(frozen=True)
+class EpisodeRef:
+    show: str
+    season: int
+    episode: int
+
+
 class TitleParser:
+    @staticmethod
+    def parse_episode_ref(path: str):
+        if not path:
+            return None
+
+        filename = Path(path).stem
+        match = re.match(
+            r"^(?P<show>.+?)\s*-\s*[sS](?P<season>\d{2,})[eE](?P<episode>\d{2,})$",
+            filename,
+        )
+        if not match:
+            return None
+
+        return EpisodeRef(
+            show=match.group("show").strip(),
+            season=int(match.group("season")),
+            episode=int(match.group("episode")),
+        )
+
     @staticmethod
     def parse_title(in_str: str, custom_patterns: list = None) -> str:
         if not in_str:

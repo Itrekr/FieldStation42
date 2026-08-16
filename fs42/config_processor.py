@@ -24,6 +24,7 @@ class ConfigProcessor:
         "encore",
         "hard_end",
         "schedule_increment",
+        "seasonal_run",
         "random_tags",
         "video_scramble_fx",
         "marathon",
