@@ -787,6 +787,10 @@
           "type": "boolean",
           "description": "Randomize tag selection"
         },
+        "pooled_tags": {
+          "type": "boolean",
+          "description": "Pool a list of ordinary content tags into one candidate set before applying eligibility and least-played selection"
+        },
         "marathon": {
           "type": "object",
           "description": "Marathon configuration",

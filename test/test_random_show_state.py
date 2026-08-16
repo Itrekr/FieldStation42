@@ -769,7 +769,7 @@ class TestRandomShowState(unittest.TestCase):
 
         self.assertEqual(selection, "pool_b/show_y")
 
-    def test_normal_content_shuffle_bag_selects_unique_items_before_repeat(self):
+    def test_normal_content_counter_selects_lowest_count_items(self):
         conf = {
             "network_name": "TestTV",
             "network_type": "standard",
@@ -781,18 +781,21 @@ class TestRandomShowState(unittest.TestCase):
             for letter, count in (("a", 0), ("b", 0), ("c", 5), ("d", 9))
         ]
 
-        selections = [
+        selections = {
             catalog.find_candidate(
                 "movies",
                 120,
                 datetime.datetime(2026, 1, 1, 12),
             ).path
-            for _ in range(4)
-        ]
+            for _ in range(20)
+        }
 
-        self.assertEqual(len(set(selections)), 4)
+        self.assertEqual(
+            selections,
+            {"/content/movies/movie_a.mp4", "/content/movies/movie_b.mp4"},
+        )
 
-    def test_normal_content_shuffle_bag_multiple_cycles(self):
+    def test_normal_content_counter_rotates_when_accepted_counts_update(self):
         conf = {
             "network_name": "TestTV",
             "network_type": "standard",
@@ -804,19 +807,20 @@ class TestRandomShowState(unittest.TestCase):
             for letter in ("a", "b", "c", "d")
         ]
 
-        selections = [
-            catalog.find_candidate(
+        selections = []
+        for _ in range(8):
+            selected = catalog.find_candidate(
                 "movies",
                 120,
                 datetime.datetime(2026, 1, 1, 12),
-            ).path
-            for _ in range(8)
-        ]
+            )
+            selections.append(selected.path)
+            selected.count += 1
 
         self.assertEqual(len(set(selections[:4])), 4)
         self.assertEqual(len(set(selections[4:])), 4)
 
-    def test_normal_content_shuffle_bag_persists_across_catalog_instances(self):
+    def test_normal_content_counter_does_not_use_persistent_shuffle_bag(self):
         conf = {
             "network_name": "TestTV",
             "network_type": "standard",
@@ -828,14 +832,12 @@ class TestRandomShowState(unittest.TestCase):
             for letter in ("a", "b", "c", "d")
         ]
 
-        first_two = {
-            first_catalog.find_candidate(
+        first = first_catalog.find_candidate(
                 "movies",
                 120,
                 datetime.datetime(2026, 1, 1, 12),
-            ).path
-            for _ in range(2)
-        }
+        )
+        first.count += 1
 
         second_catalog = ShowCatalog(conf, load=False)
         second_catalog.clip_index["movies"] = [
@@ -849,7 +851,15 @@ class TestRandomShowState(unittest.TestCase):
             datetime.datetime(2026, 1, 1, 12),
         ).path
 
-        self.assertNotIn(third, first_two)
+        self.assertIn(third, {
+            "/content/movies/movie_a.mp4",
+            "/content/movies/movie_b.mp4",
+            "/content/movies/movie_c.mp4",
+            "/content/movies/movie_d.mp4",
+        })
+        self.assertIsNone(
+            SequenceIO().get_random_selection_state("TestTV", "content_tag", "movies")
+        )
 
 
 if __name__ == "__main__":

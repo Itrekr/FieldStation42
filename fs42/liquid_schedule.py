@@ -84,7 +84,8 @@ class LiquidSchedule:
         if the_match:
             raise ClipShowKickBack(the_match, the_match)
 
-        break_info, break_strategy, increment = self._break_info(slot_config, tag_str, candidate.path)
+        effective_tag = candidate.tag if isinstance(tag_str, list) else tag_str
+        break_info, break_strategy, increment = self._break_info(slot_config, effective_tag, candidate.path)
 
         target_duration = self._calc_target_duration(candidate.duration, increment)
         next_mark = current_mark + datetime.timedelta(seconds=target_duration)
@@ -466,6 +467,20 @@ class LiquidSchedule:
                     exclusion_index[rp] = []
                 exclusion_index[rp].append((block.start_time, block.end_time))
 
+    @staticmethod
+    def _increment_block_count(block):
+        if not block or not block.content:
+            return
+
+        if isinstance(block.content, list):
+            for entry in block.content:
+                if hasattr(entry, "count"):
+                    entry.count += 1
+            return
+
+        if hasattr(block.content, "count"):
+            block.content.count += 1
+
     def _fluid(self, start_time, end_target):
         # this is the core of the scheduler.
         new_blocks = []
@@ -519,6 +534,13 @@ class LiquidSchedule:
             tag_index = None
             if not is_encore:
                 tag_str,tag_index = SlotReader.get_tag_from_slot(slot_config, current_mark)
+                if (
+                    slot_config
+                    and slot_config.get("pooled_tags")
+                    and isinstance(slot_config.get("tags"), list)
+                ):
+                    tag_str = slot_config["tags"]
+                    tag_index = None
 
             new_block = None
             encore_key = None
@@ -636,6 +658,7 @@ class LiquidSchedule:
                 and new_block.end_time < hard_end
             ):
                 new_blocks.append(new_block)
+                self._increment_block_count(new_block)
                 encore_agent.record_airing(accepted_source_airing_id, new_block)
                 self._register_exclusion(exclusion_index, new_block)
                 filler_block, next_mark = self._fill_to_boundary(
@@ -645,11 +668,13 @@ class LiquidSchedule:
                     exclusion_index=exclusion_index,
                 )
                 new_blocks.append(filler_block)
+                self._increment_block_count(filler_block)
                 self._register_exclusion(exclusion_index, filler_block)
                 current_mark = next_mark
                 continue
 
             new_blocks.append(new_block)
+            self._increment_block_count(new_block)
             encore_agent.record_airing(accepted_source_airing_id, new_block)
             self._register_exclusion(exclusion_index, new_block)
             current_mark = next_mark

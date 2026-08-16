@@ -498,8 +498,14 @@ class TestSeasonalRandomShow(unittest.TestCase):
             )
 
     def test_two_seasonal_lanes_avoid_same_show_when_possible(self):
-        files_a = [_episode(self.root, "summer/ShowA", "ShowA", 1, 1)]
-        files_b = [_episode(self.root, "summer/ShowB", "ShowB", 1, 1)]
+        files_a = [
+            _episode(self.root, "summer/ShowA", "ShowA", 1, 1),
+            _episode(self.root, "summer/ShowA", "ShowA", 1, 2),
+        ]
+        files_b = [
+            _episode(self.root, "summer/ShowB", "ShowB", 1, 1),
+            _episode(self.root, "summer/ShowB", "ShowB", 1, 2),
+        ]
         for lane in ("lane1", "lane2"):
             _put_show("TestTV", lane, "summer/ShowA", files_a, parent_tag="summer")
             _put_show("TestTV", lane, "summer/ShowB", files_b, parent_tag="summer")

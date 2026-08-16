@@ -586,6 +586,46 @@ class ShowCatalog:
         else:
             return None
 
+    def _eligible_candidates(self, tag, seconds, when, exclusion_index=None, proposed_start=None, meta_hints=None):
+        tags = tag if isinstance(tag, list) else [tag]
+        candidates = []
+        for one_tag in tags:
+            if one_tag in self.clip_index and len(self.clip_index[one_tag]):
+                candidates.extend(self.clip_index[one_tag])
+
+        if not candidates:
+            return []
+
+        matches = []
+
+        meta_hints = meta_hints or self.config.get("meta_hints")
+        if meta_hints:
+            candidates = HintAgent.filter_candidate_entries(when, candidates, meta_hints)
+
+        for candidate in candidates:
+            # restrict content to fit and be valid (zero duration is likely not valid)
+            if (
+                seconds > candidate.duration >= 1
+                    and MediaProcessor._test_candidate_hints(candidate.hints, when)
+            ):
+                # skip if a sibling channel is already playing this file in an
+                # overlapping time window (handles same-start AND mid-play overlap)
+                if (
+                    exclusion_index is not None
+                    and proposed_start is not None
+                    and candidate.realpath
+                    and candidate.realpath in exclusion_index
+                ):
+                    proposed_end = proposed_start + datetime.timedelta(seconds=candidate.duration)
+                    if any(
+                        proposed_start < w_end and w_start < proposed_end
+                        for w_start, w_end in exclusion_index[candidate.realpath]
+                    ):
+                        continue
+                matches.append(candidate)
+
+        return matches
+
     def find_candidate(self, tag, seconds, when, exclusion_index=None, proposed_start=None, meta_hints=None):
         """Find the best candidate for a given tag and duration.
 
@@ -595,45 +635,18 @@ class ShowCatalog:
         proposed_start: the datetime at which this slot would begin (required when
             exclusion_index is provided).
         """
-        if tag in self.clip_index and len(self.clip_index[tag]):
-            candidates = self.clip_index[tag]
-            matches = []
-
-            # filter candidates based on configuration hints in config file
-            meta_hints = self.config.get("meta_hints")
-            if meta_hints:
-                candidates = HintAgent.filter_candidate_entries(when, candidates, meta_hints)
-
-            for candidate in candidates:
-                # restrict content to fit and be valid (zero duration is likely not valid)
-                if (
-                    seconds > candidate.duration >= 1
-                        and MediaProcessor._test_candidate_hints(candidate.hints, when)
-                ):
-                    # skip if a sibling channel is already playing this file in an
-                    # overlapping time window (handles same-start AND mid-play overlap)
-                    if (
-                        exclusion_index is not None
-                        and proposed_start is not None
-                        and candidate.realpath
-                        and candidate.realpath in exclusion_index
-                    ):
-                        proposed_end = proposed_start + datetime.timedelta(seconds=candidate.duration)
-                        if any(
-                            proposed_start < w_end and w_start < proposed_end
-                            for w_start, w_end in exclusion_index[candidate.realpath]
-                        ):
-                            continue
-                    matches.append(candidate)
-            #random.shuffle(matches)
-            if not len(matches):
-                err = f"Could not find candidate video for tag={tag} under {seconds} in len - maybe add some shorter content?"
-                raise (MatchingContentNotFound(err))
-            result = self._shuffle_bag_candidate(tag, matches)
-            # note, this has been migrated
-            result.count += 1
-            # CatalogAPI.set_play_count(self.config, result.path, result.count)
-            return result
+        matches = self._eligible_candidates(
+            tag,
+            seconds,
+            when,
+            exclusion_index=exclusion_index,
+            proposed_start=proposed_start,
+            meta_hints=meta_hints,
+        )
+        if not len(matches):
+            err = f"Could not find candidate video for tag={tag} under {seconds} in len - maybe add some shorter content?"
+            raise (MatchingContentNotFound(err))
+        return self._lowest_count(matches)
 
     def _augment_candidates(self, candidates, key, seconds, when):
         """Helper to merge coming-up-next bump folder candidates into an existing pool if the key exists."""

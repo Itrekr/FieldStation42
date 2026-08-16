@@ -26,6 +26,7 @@ class ConfigProcessor:
         "schedule_increment",
         "seasonal_run",
         "random_tags",
+        "pooled_tags",
         "video_scramble_fx",
         "marathon",
     ]

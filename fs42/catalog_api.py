@@ -1,5 +1,6 @@
 from fs42.catalog_io import CatalogIO
 from fs42.catalog_entry import CatalogEntry
+from fs42.timings import DAYS
 
 class CatalogAPI:
     @staticmethod
@@ -18,8 +19,84 @@ class CatalogAPI:
 
     @staticmethod
     def set_entries(station_config, entries: list[CatalogEntry]):
+        CatalogAPI._preserve_counts(station_config, entries)
         CatalogAPI.delete_catalog(station_config)
         CatalogIO().put_catalog_entries(station_config["network_name"], entries)
+
+    @staticmethod
+    def _entry_identity(entry):
+        physical_path = entry.realpath or entry.path
+        return (entry.tag, physical_path)
+
+    @staticmethod
+    def _pooled_tag_groups(station_config):
+        groups = []
+
+        def harvest(slot):
+            if not isinstance(slot, dict) or not slot.get("pooled_tags"):
+                return
+            tags = slot.get("tags")
+            if isinstance(tags, list) and tags:
+                groups.append(set(tags))
+
+        for day in DAYS:
+            for slot in station_config.get(day, {}).values():
+                harvest(slot)
+
+        for override_slots in station_config.get("date_overrides", {}).values():
+            if isinstance(override_slots, dict):
+                for slot in override_slots.values():
+                    harvest(slot)
+
+        for week_schedule in station_config.get("week_overrides", {}).values():
+            if isinstance(week_schedule, dict):
+                for day in DAYS:
+                    for slot in week_schedule.get(day, {}).values():
+                        harvest(slot)
+
+        return groups
+
+    @staticmethod
+    def _preserve_counts(station_config, entries):
+        old_entries = CatalogIO().get_catalog_entries(station_config["network_name"])
+        if not old_entries:
+            return
+
+        old_by_identity = {
+            CatalogAPI._entry_identity(entry): entry.count
+            for entry in old_entries
+        }
+        old_by_tag = {}
+        for entry in old_entries:
+            old_by_tag.setdefault(entry.tag, []).append(entry.count)
+
+        pooled_groups = CatalogAPI._pooled_tag_groups(station_config)
+        old_by_pool = []
+        for group in pooled_groups:
+            counts = [
+                entry.count
+                for entry in old_entries
+                if entry.tag in group
+            ]
+            old_by_pool.append((group, min(counts) if counts else None))
+
+        for entry in entries:
+            identity = CatalogAPI._entry_identity(entry)
+            if identity in old_by_identity:
+                entry.count = old_by_identity[identity]
+                continue
+
+            pool_mins = [
+                min_count
+                for group, min_count in old_by_pool
+                if entry.tag in group and min_count is not None
+            ]
+            if pool_mins:
+                entry.count = min(pool_mins)
+            elif entry.tag in old_by_tag:
+                entry.count = min(old_by_tag[entry.tag])
+            else:
+                entry.count = 0
 
     @staticmethod
     def search_entries(station_config, query: str):
