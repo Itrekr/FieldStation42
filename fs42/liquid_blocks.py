@@ -135,6 +135,12 @@ class LiquidBlock:
                 # This respects the user's break_duration setting
                 desired_breaks = max(1, int(diff / break_duration))
 
+                # Keep a realistic number of internal commercial breaks.
+                if self.playback_duration() <= 30 * 60:
+                    desired_breaks = min(desired_breaks, 2)
+                else:
+                    desired_breaks = min(desired_breaks, 3)
+
                 # break_points contains content segments, so we need desired_breaks + 1 segments
                 desired_segments = desired_breaks + 1
 
