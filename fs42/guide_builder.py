@@ -99,8 +99,12 @@ class GuideBuilder:
         for station in StationManager().stations:
             if station["hidden"]:
                 continue
-            elif not station["_has_schedule"]:
+            elif not station["_has_schedule"] or (
+                station["network_type"] == "loop" and station.get("quantum", False)
+            ):
                 to_display = station.get("network_long_name", station["network_name"])
+                if station["network_type"] == "loop" and station.get("quantum", False):
+                    to_display = f"{to_display} — Quantum programming"
                 placeholder = PreviewBlock(to_display, width=5400)
                 entries = [placeholder]
             else:

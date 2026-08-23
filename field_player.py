@@ -39,6 +39,11 @@ except ModuleNotFoundError:
 STATE_SHELVE = "runtime/player_state.bin"
 api_commands_queue: multiprocessing.Queue = None
 
+
+def is_quantum_loop(channel_conf):
+    return channel_conf.get("network_type") == "loop" and channel_conf.get("quantum", False) is True
+
+
 def input_check():
     if api_commands_queue:
         q_message = None
@@ -193,6 +198,9 @@ def main_loop(transition_fn, shutdown_queue=None, api_proc=None, schedule_lock=N
             logger.info("Starting an executable channel")
             player.stop_player()
             player_state =  execute_command(channel_conf, input_check)
+        elif is_quantum_loop(channel_conf) and not skip_play:
+            logger.info("Starting quantum loop channel %s", channel_conf["network_name"])
+            player_state = player.play_quantum(channel_conf)
         elif not skip_play:
             now = datetime.datetime.now()
 

@@ -56,6 +56,11 @@
           "type": "boolean",
           "description": "When `true`, every video in `content_dir` plays once before the list is shuffled and replayed. Defaults to `false` (alphabetical order, looping). Only applies to loop network type."
         },
+        "quantum": {
+          "type": "boolean",
+          "default": false,
+          "description": "For loop channels, advance playback only while the channel is tuned. The current item, offset, and shuffle order are persisted and resumed. Defaults to false."
+        },
         "bump_dir": {
           "type": "string",
           "description": "Directory containing bump videos"

@@ -37,6 +37,8 @@ from fs42.reception import (
 from fs42.liquid_manager import LiquidManager, PlayPoint, ScheduleNotFound, ScheduleQueryNotInBounds
 
 from fs42.liquid_schedule import LiquidSchedule
+from fs42.catalog import ShowCatalog
+from fs42.quantum_state import QuantumState
 from fs42.station_manager import StationManager
 from fs42.slot_reader import SlotReader
 
@@ -197,6 +199,8 @@ class StationPlayer:
         self.schedule_lock = None
         self._active_afx = None
         self._pending_response = None
+        self._quantum_active = None
+        self.quantum_state = QuantumState()
 
     def load_up(self):
         start_time = time.perf_counter()
@@ -296,6 +300,7 @@ class StationPlayer:
             self._l.debug(f"Could not show stream down OSD: {e}")
 
     def shutdown(self):
+        self._checkpoint_active_quantum()
         self.current_playing_file_path = None
         # Terminate any running web process
         if self.web_process and self.web_process.is_alive():
@@ -323,6 +328,143 @@ class StationPlayer:
         self._close_now_playing()
 
         self.mpv.terminate()
+
+    def _safe_mpv_position(self, fallback=0):
+        try:
+            position = self.mpv.time_pos
+            if position is not None:
+                return max(0.0, float(position))
+        except Exception:
+            pass
+        return fallback
+
+    def _checkpoint_active_quantum(self):
+        active = self._quantum_active
+        if not active:
+            return
+        offset = self._safe_mpv_position(active["offset"])
+        self.quantum_state.save(active["network_name"], active["path"], offset, active["order"])
+        active["offset"] = offset
+
+    def _resolve_quantum_cursor(self, channel_conf, content):
+        network_name = channel_conf["network_name"]
+        shuffle = channel_conf.get("shuffle_loop", False)
+        cursor = self.quantum_state.load(network_name)
+
+        if shuffle and cursor and cursor.order:
+            by_path = {clip.path: clip for clip in content}
+            ordered = [by_path.pop(path) for path in cursor.order if path in by_path]
+            ordered.extend(by_path.values())
+            content = ordered
+
+        if not cursor:
+            return content, 0, 0.0
+
+        current_index = next((i for i, clip in enumerate(content) if clip.path == cursor.path), None)
+        if current_index is None:
+            self._l.warning(
+                "Quantum state for %s referenced missing content %s; resetting to first available item",
+                network_name,
+                cursor.path,
+            )
+            self.quantum_state.save(network_name, content[0].path, 0, [c.path for c in content] if shuffle else None)
+            return content, 0, 0.0
+
+        offset = cursor.offset
+        if offset >= max(0, content[current_index].duration - 2.0):
+            current_index += 1
+            if current_index >= len(content):
+                if shuffle:
+                    random.shuffle(content)
+                current_index = 0
+            offset = 0.0
+            self.quantum_state.save(
+                network_name,
+                content[current_index].path,
+                offset,
+                [c.path for c in content] if shuffle else None,
+            )
+        return content, current_index, offset
+
+    def play_quantum(self, channel_conf):
+        """Play a loop using a persistent clock that advances only while tuned."""
+        network_name = channel_conf["network_name"]
+        content = ShowCatalog(channel_conf).get_all_by_tag("content") or []
+        if not content:
+            self._l.error("Quantum loop channel %s has no content", network_name)
+            return PlayerOutcome(PlayerState.FAILED, "Quantum loop channel has no content")
+
+        content, current_index, current_offset = self._resolve_quantum_cursor(channel_conf, list(content))
+        shuffle = channel_conf.get("shuffle_loop", False)
+        try:
+            checkpoint_interval = max(1.0, float(channel_conf.get("quantum_checkpoint_interval", 10)))
+        except (TypeError, ValueError):
+            checkpoint_interval = 10.0
+
+        while True:
+            clip = content[current_index]
+            order = [item.path for item in content] if shuffle else None
+            self.quantum_state.save(network_name, clip.path, current_offset, order)
+            self._quantum_active = {
+                "network_name": network_name,
+                "path": clip.path,
+                "offset": current_offset,
+                "order": order,
+            }
+
+            worked = self.play_file(
+                clip.path,
+                file_duration=clip.duration,
+                offset_seconds=current_offset,
+                title=clip.title,
+                content_type=clip.content_type,
+                media_type=clip.media_type,
+            )
+            if not worked:
+                self._quantum_active = None
+                return PlayerOutcome(PlayerState.FAILED, f"Could not play quantum content: {clip.path}")
+
+            last_position = current_offset
+            last_checkpoint = time.monotonic()
+            while True:
+                response = self.input_check_fn()
+                if response:
+                    if self.handle_runtime_command_outcome(response):
+                        continue
+                    last_position = self._safe_mpv_position(last_position)
+                    self.quantum_state.save(network_name, clip.path, last_position, order)
+                    self._quantum_active = None
+                    return response
+
+                position = self._safe_mpv_position(None)
+                if position is not None:
+                    last_position = position
+
+                now = time.monotonic()
+                if now - last_checkpoint >= checkpoint_interval:
+                    self.quantum_state.save(network_name, clip.path, last_position, order)
+                    self._quantum_active["offset"] = last_position
+                    last_checkpoint = now
+
+                try:
+                    finished = bool(self.mpv.eof_reached) or bool(self.mpv.idle_active)
+                except Exception:
+                    finished = position is None
+                if finished or position is None:
+                    break
+
+                time.sleep(0.05)
+
+            current_index += 1
+            if current_index >= len(content):
+                if shuffle:
+                    random.shuffle(content)
+                current_index = 0
+            current_offset = 0.0
+            next_clip = content[current_index]
+            next_order = [item.path for item in content] if shuffle else None
+            self.quantum_state.save(network_name, next_clip.path, 0, next_order)
+            self._quantum_active = None
 
     def update_filters(self):
         self.mpv.vf = self.reception.filter()

@@ -4,6 +4,7 @@
     "channel_number": 50,
     "network_type": "loop",
     "shuffle_loop": false,
+    "quantum": false,
     "content_dir": "catalog/?"
   }
 }

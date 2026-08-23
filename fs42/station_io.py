@@ -28,6 +28,7 @@ class StationIO:
         "break_duration": 120,
         "hidden": False,
         "media_filter": "video",
+        "quantum": False,
     }
 
     # Fields that reference files that should exist

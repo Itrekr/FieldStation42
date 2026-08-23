@@ -42,6 +42,7 @@ If not specified, the following defaults are automatically applied:
 | `clip_shows` | `[]` |
 | `break_duration` | `120` |
 | `hidden` | `false` |
+| `quantum` | `false` |
 
 ## Required Properties
 
@@ -76,6 +77,21 @@ The `network_type` property determines how the station operates:
 | `network_type` | string | Type of network operation | `"standard"`, `"web"`, `"guide"`, `"loop"`, `"streaming"` |
 | `hidden` | boolean | Hide channel from guide listings | `true`, `false` |
 | `active_rules` | object | Availability rules for when this config should be active | See [Active Rules](#active-rules) below |
+
+### Quantum loop channels
+
+Loop channels normally advance according to wall-clock time, including while the viewer is tuned to another channel. Setting `"quantum": true` on a loop channel changes it to viewer-time playback: it advances only while actively tuned. Changing channels saves the current media item and playback position, and returning resumes from that position. The cursor survives application restarts.
+
+```json
+{
+  "network_type": "loop",
+  "content_dir": "catalog/gilmost",
+  "shuffle_loop": false,
+  "quantum": true
+}
+```
+
+Quantum shuffle order is persisted when `shuffle_loop` is enabled. Quantum channels display generic programming information in the guide because their future episode position depends on viewing time and cannot be predicted from wall-clock time. The option is inert for non-loop channels and defaults to `false`.
 
 ### Scheduling Properties (Standard Networks)
 
