@@ -346,9 +346,12 @@ class LiquidOffAirBlock(LiquidBlock):
 
 
 class LiquidLoopBlock(LiquidBlock):
-    def __init__(self, content, start_time, end_time, title=None, break_strategy="standard", break_info=None, shuffle=False):
+    def __init__(self, content, start_time, end_time, title=None, break_strategy="standard", break_info=None,
+                 shuffle=False, start_index=0, start_offset=0):
         super().__init__(content, start_time, end_time, title, break_strategy, break_info)
         self.shuffle = shuffle
+        self.start_index = start_index
+        self.start_offset = start_offset
 
     def __str__(self):
         return f"{self.start_time.strftime('%m/%d %H:%M')} - {self.end_time.strftime('%H:%M')} - {self.title} - LOOP"
@@ -360,13 +363,21 @@ class LiquidLoopBlock(LiquidBlock):
         keep_going = True
         current_mark: datetime.datetime = self.start_time
         next_mark: datetime.datetime = None
-        current_index = 0
+        if not 0 <= self.start_index < len(self.content):
+            raise ValueError("LiquidLoopBlock start_index is outside content")
+        if not 0 <= self.start_offset < self.content[self.start_index].duration:
+            raise ValueError("LiquidLoopBlock start_offset is outside the starting clip")
+
+        current_index = self.start_index
+        current_offset = self.start_offset
         while keep_going:
             clip = self.content[current_index]
-            next_mark = current_mark + datetime.timedelta(seconds=clip.duration)
-            duration = clip.duration
+            entry_offset = current_offset
+            duration = clip.duration - entry_offset
+            next_mark = current_mark + datetime.timedelta(seconds=duration)
             if next_mark < self.end_time:
                 current_index += 1
+                current_offset = 0
                 if current_index >= len(self.content):
                     current_index = 0
                     if self.shuffle:
@@ -376,7 +387,7 @@ class LiquidLoopBlock(LiquidBlock):
                 keep_going = False
                 duration = (self.end_time - current_mark).total_seconds()
 
-            entries.append(BlockPlanEntry(clip.path, 0, duration, content_type=clip.content_type, media_type=clip.media_type))
+            entries.append(BlockPlanEntry(clip.path, entry_offset, duration, content_type=clip.content_type, media_type=clip.media_type))
 
             current_mark = next_mark
         self.plan = entries

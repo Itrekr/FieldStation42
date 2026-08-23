@@ -56,26 +56,53 @@ class LiquidSchedule:
 
     def _flood(self, start_time, end_target):
         # flood the schedule - this is used for loop channels
-        diff = end_target - start_time
         content = self.catalog.get_all_by_tag("content")
-        new_blocks = []
         shuffle = self.conf.get("shuffle_loop", False)
+        start_index = 0
+        start_offset = 0
+
+        # Continue from the exact point where the preceding loop block stopped.
+        # The final plan entry may represent only part of a clip.
+        previous_block = self._blocks[-1] if self._blocks else None
+        if isinstance(previous_block, LiquidLoopBlock) and previous_block.end_time == start_time:
+            # A shuffled block stores its current catalogue ordering, so retain
+            # that order when extending the schedule in a later process.
+            if shuffle and previous_block.content:
+                by_path = {clip.path: clip for clip in content}
+                previous_paths = [clip.path for clip in previous_block.content]
+                content = [by_path.pop(path) for path in previous_paths if path in by_path]
+                content.extend(by_path.values())
+
+            previous_entry = previous_block.plan[-1] if previous_block.plan else None
+            if previous_entry:
+                for index, clip in enumerate(content):
+                    if clip.path != previous_entry.path:
+                        continue
+                    consumed = previous_entry.skip + previous_entry.duration
+                    if consumed < clip.duration:
+                        start_index = index
+                        start_offset = consumed
+                    else:
+                        start_index = (index + 1) % len(content)
+                    break
 
         programming_name = (
             self.conf["network_long_name"] if "network_long_name" in self.conf else self.conf["network_name"]
         )
 
-        for i in range(diff.days):
-            current_mark = start_time + datetime.timedelta(days=i)
-            next_mark = start_time + datetime.timedelta(days=i + 1)
-            block = LiquidLoopBlock(content, current_mark, next_mark, programming_name, shuffle=shuffle)
-            new_blocks.append(block)
+        block = LiquidLoopBlock(
+            content,
+            start_time,
+            end_target,
+            programming_name,
+            shuffle=shuffle,
+            start_index=start_index,
+            start_offset=start_offset,
+        )
+        self._l.info("Building plan for 1 new schedule block")
+        block.make_plan(self.catalog)
 
-        self._l.info(f"Building plans for {len(new_blocks)} new schedule blocks")
-        for block in new_blocks:
-            block.make_plan(self.catalog)
-
-        LiquidAPI.add_blocks(self.conf, new_blocks)
+        LiquidAPI.add_blocks(self.conf, [block])
         self._load_blocks()
 
     def _block_for_candidate(self, slot_config, tag_str, current_mark, candidate) -> LiquidBlock:
