@@ -14,6 +14,7 @@ from fs42.liquid_schedule import LiquidSchedule
 from fs42.fluid_builder import FluidBuilder
 from fs42.sequence_api import SequenceAPI
 from fs42.fs42_server.fs42_server import mount_fs42_api
+from fs42.player_runtime import running_player_pid
 
 FF_USE_FLUID_FILE_CACHE = True
 
@@ -84,7 +85,11 @@ def build_parser():
         "-q",
         "--rebuild_sequences",
         nargs="*",
-        help="Restarts sequences for the named stations or all stations if none are specified. This will take effect in next schedule build.",
+        help=(
+            "Restarts sequence and seasonal progress for the named stations or all "
+            "stations if none are specified. Encore airing history and cursors are "
+            "preserved. This will take effect in the next schedule build."
+        ),
     )
     parser.add_argument(
         "-a",
@@ -244,6 +249,26 @@ def main():
     execution_start_time = datetime.datetime.now()
     parser = build_parser()
     args = parser.parse_args()
+
+    schedule_mutation_requested = any(
+        value is not None
+        for value in (
+            args.delete_schedules,
+            args.rebuild_catalog,
+            args.add_day,
+            args.add_week,
+            args.add_month,
+        )
+    )
+    player_pid = running_player_pid() if schedule_mutation_requested else None
+    if player_pid:
+        warning = (
+            f"A running field player (PID {player_pid}) cannot be reloaded by this "
+            "standalone command. Restart it after this schedule mutation so playback "
+            "and the guide use the same schedule."
+        )
+        _l.warning(warning)
+        console.print(f"[bold yellow]Warning: {warning}[/bold yellow]")
 
     if args.graphical_interface:
         try:

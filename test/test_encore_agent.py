@@ -462,7 +462,7 @@ class TestEncoreAgent(unittest.TestCase):
         self.assertEqual(history, {"OtherTV": 1})
         self.assertEqual(cursors, {"OtherTV": 1})
 
-    def test_delete_sequences_clears_encore_state(self):
+    def test_delete_sequences_preserves_encore_state(self):
         _configure_db(self.tmp_path)
         _seed_encore_state("TestTV")
         _seed_encore_state("OtherTV")
@@ -489,10 +489,10 @@ class TestEncoreAgent(unittest.TestCase):
 
         self.assertEqual(SequenceIO().get_all_sequences_for_station("TestTV"), [])
         history, cursors = _encore_counts()
-        self.assertEqual(history, {"OtherTV": 1})
-        self.assertEqual(cursors, {"OtherTV": 1})
+        self.assertEqual(history, {"OtherTV": 1, "TestTV": 1})
+        self.assertEqual(cursors, {"OtherTV": 1, "TestTV": 1})
 
-    def test_reset_schedule_clears_encore_state(self):
+    def test_reset_schedule_preserves_historical_encore_state(self):
         _configure_db(self.tmp_path)
         _seed_encore_state("TestTV")
         station = {
@@ -513,8 +513,8 @@ class TestEncoreAgent(unittest.TestCase):
             manager.reset_schedule(station)
 
         history, cursors = _encore_counts()
-        self.assertEqual(history, {})
-        self.assertEqual(cursors, {})
+        self.assertEqual(history, {"TestTV": 1})
+        self.assertEqual(cursors, {"TestTV": 1})
 
     def test_failed_queue_resolution_does_not_advance_cursor(self):
         first = _entry("/content/prime/show_a/e01.mp4")

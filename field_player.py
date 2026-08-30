@@ -25,6 +25,7 @@ from fs42.reception import (
 )
 from fs42.live_schedule_agent import LiveScheduleAgent
 from fs42.command_executor import execute_command
+from fs42.player_runtime import register_player, unregister_player
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s:%(name)s:%(message)s", level=logging.INFO
@@ -402,9 +403,11 @@ if __name__ == "__main__":
 
     schedule_lock = multiprocessing.Lock()
 
+    register_player()
     try:
         main_loop(trans_fn, shutdown_queue=shutdown_queue, api_proc=api_proc, schedule_lock=schedule_lock)
     finally:
+        unregister_player()
         if shutdown_queue is not None:
             shutdown_queue.put("shutdown")
         if api_proc is not None:
