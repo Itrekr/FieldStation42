@@ -7,6 +7,14 @@ from unittest.mock import patch
 from fs42 import player_runtime
 
 
+class TestDefaultPlayerRuntimePath(unittest.TestCase):
+    def test_default_pid_path_is_absolute_and_project_anchored(self):
+        expected = Path(player_runtime.__file__).resolve().parent.parent / "runtime" / "player.pid"
+
+        self.assertTrue(player_runtime.PLAYER_PID_PATH.is_absolute())
+        self.assertEqual(player_runtime.PLAYER_PID_PATH, expected)
+
+
 class TestPlayerRuntime(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -25,6 +33,22 @@ class TestPlayerRuntime(unittest.TestCase):
 
         player_runtime.unregister_player()
         self.assertFalse(self.pid_path.exists())
+
+    def test_marker_is_independent_of_current_working_directory(self):
+        original_cwd = os.getcwd()
+        try:
+            with tempfile.TemporaryDirectory() as other_dir:
+                os.chdir(other_dir)
+                player_runtime.register_player()
+
+                self.assertEqual(player_runtime.running_player_pid(), os.getpid())
+                self.assertEqual(
+                    self.pid_path.read_text(encoding="utf-8"),
+                    str(os.getpid()),
+                )
+        finally:
+            player_runtime.unregister_player()
+            os.chdir(original_cwd)
 
     def test_stale_marker_is_removed(self):
         self.pid_path.write_text("999999999", encoding="utf-8")

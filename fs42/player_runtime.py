@@ -2,7 +2,8 @@ import os
 from pathlib import Path
 
 
-PLAYER_PID_PATH = Path("runtime/player.pid")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PLAYER_PID_PATH = PROJECT_ROOT / "runtime" / "player.pid"
 
 
 def register_player(pid=None):

@@ -203,6 +203,59 @@ def _encore_counts():
         return history, cursors
 
 
+def _simple_encore_conf(station="TestTV"):
+    source = {
+        "tags": "source_shows",
+        "airing_id": "weekly_first",
+    }
+    recap = {
+        "encore": {
+            "source": "weekly_first",
+            "strategy": "queue",
+            "cursor": "sunday_recap",
+        },
+        "fallback_tags": ["fallback_movies"],
+        "pooled_fallback_tags": True,
+    }
+    return {
+        "network_name": station,
+        "network_type": "standard",
+        "_has_schedule": True,
+        "_has_catalog": True,
+        "content_dir": "/content",
+        "clip_shows": {},
+        "break_strategy": "standard",
+        "commercial_free": True,
+        "bump_dir": "bump",
+        "schedule_increment": 60,
+        "monday": {"18": source},
+        "sunday": {"6": recap},
+    }
+
+
+def _install_simple_encore_catalog(conf):
+    source = _entry(
+        "/content/source_shows/Smiling Friends - S01E01.mkv",
+        "source_shows",
+    )
+    fallback = _entry("/content/fallback_movies/Network.mkv", "fallback_movies")
+    offair = _entry("/content/offair.mp4", "off_air")
+    CatalogAPI.set_entries(conf, [source, fallback, offair])
+    return source, fallback
+
+
+def _fake_make_plan(block, catalog):
+    block.plan = [
+        BlockPlanEntry(
+            block.content.path,
+            0,
+            block.content.duration,
+            content_type=block.content.content_type,
+            media_type=block.content.media_type,
+        )
+    ]
+
+
 class TestEncoreAgent(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -701,6 +754,144 @@ class TestEncoreAgent(unittest.TestCase):
         self.assertEqual(paths(16, 6, 6), [
             f"/content/prime/show_a/e{index:02}.mp4"
             for index in range(7, 13)
+        ])
+
+    def test_rebuild_cycle_preserves_weekly_history_for_sunday_recap(self):
+        _configure_db(self.tmp_path)
+        conf = _simple_encore_conf()
+        StationManager().stations = [conf]
+        source, _fallback = _install_simple_encore_catalog(conf)
+        monday = datetime.datetime(2026, 8, 3, 18)
+        sunday = datetime.datetime(2026, 8, 9, 6)
+        cutoff = sunday.replace(hour=0)
+
+        with (
+            patch.object(LiquidBlock, "make_plan", _fake_make_plan),
+            patch.object(CatalogAPI, "update_play_counts", lambda _conf, _entries: None),
+        ):
+            weekday_schedule = LiquidSchedule(conf)
+            weekday_schedule._fluid(monday, monday + datetime.timedelta(hours=1))
+
+            with sqlite3.connect(StationManager().server_conf["db_path"]) as connection:
+                before = connection.execute("""
+                    SELECT source_start_time, content_path
+                    FROM airing_history
+                    WHERE station = ? AND airing_id = 'weekly_first'
+                    ORDER BY source_start_time
+                """, (conf["network_name"],)).fetchall()
+            self.assertEqual(before, [(monday.isoformat(), source.path)])
+
+            manager = LiquidManager()
+            manager.schedules = {conf["network_name"]: LiquidAPI.get_blocks(conf)}
+            with (
+                patch.object(LiquidManager, "_schedule_reset_cutoff", return_value=cutoff),
+                patch.object(LiquidManager, "reload_schedules", return_value=None),
+            ):
+                manager.reset_schedule(conf)
+
+            # Exercise the same public sequence rebuild used by the CLI. This
+            # station has no sequence slots, but the destructive reset path runs.
+            SequenceAPI.rebuild_sequences(conf)
+
+            with sqlite3.connect(StationManager().server_conf["db_path"]) as connection:
+                after = connection.execute("""
+                    SELECT source_start_time, content_path
+                    FROM airing_history
+                    WHERE station = ? AND airing_id = 'weekly_first'
+                    ORDER BY source_start_time
+                """, (conf["network_name"],)).fetchall()
+            self.assertEqual(after, before)
+
+            recap_schedule = LiquidSchedule(conf)
+            recap_schedule._fluid(sunday, sunday + datetime.timedelta(hours=1))
+
+        recap = next(block for block in recap_schedule._blocks if block.start_time == sunday)
+        self.assertEqual(recap.content.path, source.path)
+        self.assertNotEqual(recap.content.tag, "fallback_movies")
+        self.assertEqual(recap.encore_key["source"], "weekly_first")
+        self.assertEqual(recap.encore_key["cursor"], "sunday_recap")
+
+    def test_sunday_recap_uses_fallback_when_history_is_genuinely_absent(self):
+        _configure_db(self.tmp_path)
+        conf = _simple_encore_conf()
+        StationManager().stations = [conf]
+        _source, fallback = _install_simple_encore_catalog(conf)
+        sunday = datetime.datetime(2026, 8, 9, 6)
+
+        with (
+            patch.object(LiquidBlock, "make_plan", _fake_make_plan),
+            patch.object(CatalogAPI, "update_play_counts", lambda _conf, _entries: None),
+        ):
+            schedule = LiquidSchedule(conf)
+            schedule._fluid(sunday, sunday + datetime.timedelta(hours=1))
+
+        recap = next(block for block in schedule._blocks if block.start_time == sunday)
+        self.assertEqual(recap.content.path, fallback.path)
+        self.assertEqual(recap.content.tag, "fallback_movies")
+        self.assertIsNone(recap.encore_key)
+
+    def test_reset_all_schedules_preserves_past_and_rewinds_each_station(self):
+        _configure_db(self.tmp_path)
+        cutoff = datetime.datetime(2026, 8, 9)
+        past = cutoff - datetime.timedelta(days=1)
+        future = cutoff + datetime.timedelta(days=1)
+        stations = [_simple_encore_conf("StationA"), _simple_encore_conf("StationB")]
+        StationManager().stations = stations
+        manager = LiquidManager()
+        manager.station_configs = stations
+        manager.schedules = {}
+
+        for station in stations:
+            station_name = station["network_name"]
+            past_entry = _entry(f"/content/{station_name}/past.mkv", "source_shows")
+            future_entry = _entry(f"/content/{station_name}/future.mkv", "source_shows")
+            agent = EncoreAgent(station, FakeCatalog([past_entry, future_entry]))
+            agent.record_airing("weekly_first", _block(past_entry, past))
+            agent.record_airing("weekly_first", _block(future_entry, future))
+            agent.record_consumption({
+                "source": "weekly_first",
+                "strategy": "queue",
+                "cursor": "sunday_recap",
+                "source_start_time": future.isoformat(),
+            })
+            agent.commit()
+
+            retained_recap = _block(past_entry, cutoff - datetime.timedelta(hours=1))
+            retained_recap.encore_key = {
+                "source": "weekly_first",
+                "strategy": "queue",
+                "cursor": "sunday_recap",
+                "source_start_time": past.isoformat(),
+            }
+            manager.schedules[station_name] = [retained_recap]
+
+        with (
+            patch.object(LiquidManager, "_schedule_reset_cutoff", return_value=cutoff),
+            patch.object(LiquidManager, "reset_sequences", return_value=None),
+            patch.object(LiquidAPI, "delete_blocks", return_value=None),
+            patch.object(LiquidManager, "reload_schedules", return_value=None),
+        ):
+            manager.reset_all_schedules()
+
+        with sqlite3.connect(StationManager().server_conf["db_path"]) as connection:
+            history = connection.execute("""
+                SELECT station, source_start_time
+                FROM airing_history
+                ORDER BY station, source_start_time
+            """).fetchall()
+            cursors = connection.execute("""
+                SELECT station, last_source_start_time
+                FROM encore_cursor
+                ORDER BY station
+            """).fetchall()
+
+        self.assertEqual(history, [
+            ("StationA", past.isoformat()),
+            ("StationB", past.isoformat()),
+        ])
+        self.assertEqual(cursors, [
+            ("StationA", past.isoformat()),
+            ("StationB", past.isoformat()),
         ])
 
     def test_schema_requires_offset_for_offset_encores_and_cursor_for_queue_encores(self):
